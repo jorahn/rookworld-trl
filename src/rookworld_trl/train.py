@@ -48,6 +48,17 @@ class TrainingConfig:
     bf16: bool = True
     use_torch_compile: bool = False
     
+    # Logging and evaluation
+    eval_steps: int = 100
+    save_steps: int = 100
+    logging_steps: int = 10
+    tensorboard: bool = False
+    
+    # Stability improvements
+    max_grad_norm: float = 1.0
+    warmup_steps: int = 100
+    stable: bool = False
+    
     # Stockfish path (optional - will auto-detect if None)
     stockfish_path: Optional[str] = None
     
@@ -93,6 +104,13 @@ def main():
     parser.add_argument("--dataset_size", type=int, default=500, help="Number of samples to load from dataset")
     parser.add_argument("--num_generations", type=int, default=4, help="Number of completions per prompt")
     parser.add_argument("--beta", type=float, default=0.1, help="KL penalty coefficient")
+    parser.add_argument("--eval_steps", type=int, default=100, help="Evaluation frequency")
+    parser.add_argument("--save_steps", type=int, default=100, help="Save frequency") 
+    parser.add_argument("--logging_steps", type=int, default=10, help="Logging frequency")
+    parser.add_argument("--tensorboard", action="store_true", help="Enable tensorboard logging")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping threshold")
+    parser.add_argument("--warmup_steps", type=int, default=100, help="Learning rate warmup steps")
+    parser.add_argument("--stable", action="store_true", help="Use stable training configuration")
     
     args = parser.parse_args()
     
@@ -100,6 +118,19 @@ def main():
     max_completion_length = max(144, args.max_completion_length)
     if max_completion_length > args.max_completion_length:
         print(f"⚠️ Increased max_completion_length from {args.max_completion_length} to {max_completion_length} (minimum required)")
+    
+    # Apply stable configuration if requested
+    if args.stable:
+        print("🛡️ Applying stable training configuration...")
+        # Override settings for stability
+        args.learning_rate = min(args.learning_rate, 1e-6)  # Cap learning rate
+        args.beta = max(args.beta, 0.3)  # Increase KL penalty
+        args.max_grad_norm = min(args.max_grad_norm, 0.5)  # Lower gradient clipping
+        args.warmup_steps = max(args.warmup_steps, 200)  # Longer warmup
+        print(f"  • Learning rate: {args.learning_rate:.2e}")
+        print(f"  • KL penalty (beta): {args.beta}")  
+        print(f"  • Max grad norm: {args.max_grad_norm}")
+        print(f"  • Warmup steps: {args.warmup_steps}")
     
     config = TrainingConfig(
         model_name=args.model_name,
@@ -114,6 +145,13 @@ def main():
         dataset_size=args.dataset_size,
         num_generations=args.num_generations,
         beta=args.beta,
+        eval_steps=args.eval_steps,
+        save_steps=args.save_steps,
+        logging_steps=args.logging_steps,
+        tensorboard=args.tensorboard,
+        max_grad_norm=args.max_grad_norm,
+        warmup_steps=args.warmup_steps,
+        stable=args.stable,
     )
     
     print("=" * 80)
@@ -130,13 +168,16 @@ def main():
     # Load tokenizer and model
     print("\n📥 Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    
+    # Properly set pad token without warnings
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+        # Don't change the model config here - let TRL handle it
     
     # Model loading with optimizations
     model_kwargs = {}
     if config.bf16 and torch.cuda.is_available():
-        model_kwargs["torch_dtype"] = torch.bfloat16
+        model_kwargs["dtype"] = torch.bfloat16
         print("✓ Using BF16 precision")
     
     model = AutoModelForCausalLM.from_pretrained(
@@ -163,8 +204,8 @@ def main():
     info = data_generator.get_samples_info()
     print(f"✓ Dataset composition: {info['total']} total ({info['P']} P: tasks, {info['A']} A: tasks)")
     
-    train_dataset = create_dataset(data_generator, size=200)
-    print(f"✓ Created training dataset with {len(train_dataset)} samples")
+    train_dataset = create_dataset(data_generator, size=config.dataset_size)
+    print(f"✓ Created training dataset with {len(train_dataset)} unique samples (requested {config.dataset_size})")
     
     # Training configuration - minimal working configuration
     training_args = GRPOConfig(
@@ -173,13 +214,15 @@ def main():
         learning_rate=config.learning_rate,
         beta=config.beta,
         num_generations=config.num_generations,
-        model_init_kwargs={},  # Required by GRPOTrainer
         max_completion_length=config.max_completion_length,
-        logging_steps=10,
-        save_steps=100,
+        logging_steps=config.logging_steps,
+        save_steps=config.save_steps,
         bf16=config.bf16,
-        report_to=[],  # Disable wandb and other external logging
-        logging_dir=None,  # Disable tensorboard logging
+        report_to=["tensorboard"] if config.tensorboard else [],
+        logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
+        max_steps=max(1, len(train_dataset) // config.batch_size) if len(train_dataset) < 1000 else -1,
+        max_grad_norm=config.max_grad_norm,
+        warmup_steps=config.warmup_steps
     )
     
     # Initialize trainer
@@ -189,7 +232,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
-        reward_funcs=reward_function,
+        reward_funcs=[reward_function],
     )
     
     print("\n🎯 Starting GRPO training...")

@@ -106,7 +106,7 @@ def parse_p_task(text: str) -> Tuple[str, str, Dict]:
     return prompt, completion, parsed_data
 
 
-def parse_a_task(text: str) -> Tuple[str, str, Dict]:
+def parse_a_task(text: str) -> Tuple[str, str, Dict, bool]:
     """
     Parse an A: (Environment) task into prompt and completion.
     
@@ -163,9 +163,10 @@ def parse_a_task(text: str) -> Tuple[str, str, Dict]:
         parsed_data['reward'] = float(reward) if reward else 0.0
         parsed_data['terminated'] = terminated.lower() in ['true', '1']
         parsed_data['truncated'] = truncated.lower() in ['true', '1']
+        valid = True  # Full format is valid
         
     elif len(components) >= 3:
-        # Partial format (prompt only)
+        # Partial format (prompt only) - still valid for training
         fen = components[0].strip()
         move = components[1].strip()
         history = components[2].strip() if len(components) > 2 else ""
@@ -176,21 +177,16 @@ def parse_a_task(text: str) -> Tuple[str, str, Dict]:
         parsed_data['fen'] = fen
         parsed_data['move'] = move
         parsed_data['history'] = history
+        valid = True  # Partial format is still valid for training
         
     else:
-        # Malformed, but try to handle gracefully
-        logger.warning(f"Malformed A: task with {len(components)} components")
-        prompt = text
-        completion = ""
-        
-        if components:
-            parsed_data['fen'] = components[0].strip()
-        if len(components) > 1:
-            parsed_data['move'] = components[1].strip()
+        # Malformed task - return as invalid
+        logger.debug(f"Malformed A: task with {len(components)} components - skipping")
+        return "", "", {}, False  # Mark as invalid
     
     logger.debug(f"Parsed A: task - prompt: {prompt[:50]}..., completion: {completion[:50] if completion else 'None'}")
     
-    return prompt, completion, parsed_data
+    return prompt, completion, parsed_data, valid
 
 
 def load_and_prepare_samples(
@@ -235,7 +231,10 @@ def load_and_prepare_samples(
                 p_count += 1
             elif text.startswith("A: "):
                 task_type = "A"
-                prompt, completion, parsed_data = parse_a_task(text)
+                prompt, completion, parsed_data, is_valid = parse_a_task(text)
+                if not is_valid:
+                    logger.debug(f"Skipping malformed A: task")
+                    continue  # Skip this sample entirely
                 a_count += 1
             else:
                 logger.warning(f"Unknown task type: {text[:50]}...")
