@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rookworld-trl"
+version = "0.1.0"
+description = "RookWorld GRPO training with HuggingFace Transformers and TRL"
+authors = [
+    {name = "Jonathan Rahn", email = "rahn.jonathan@gmail.com"},
+]
+dependencies = [
+    # Core ML libraries
+    "torch>=2.0",
+    "transformers>=4.46.3",
+    "trl>=0.22.0",
+    "accelerate>=0.30.0",
+    
+    # Chess-specific dependencies
+    "chess>=1.10.0",
+    "python-chess>=1.999",
+    
+    # Data handling
+    "datasets>=3.1.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.3",
+    
+    # Dataset source (RookWorld)
+    "huggingface-hub>=0.34.4",
+    
+    # Utilities
+    "tiktoken>=0.5.0",
+    "safetensors>=0.4.0",
+    
+    # Optional visualization
+    "matplotlib>=3.7.5",
+    "seaborn>=0.13.2",
+    
+    # Logging and monitoring
+    "tensorboard>=2.14.0",
+    "wandb>=0.16.0",
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["chess", "reinforcement-learning", "grpo", "transformers", "trl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment :: Board Games",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jrahn/rookworld-trl"
+Repository = "https://github.com/jrahn/rookworld-trl"
+Issues = "https://github.com/jrahn/rookworld-trl/issues"
+
+[project.scripts]
+rookworld-train = "rookworld_trl.train:main"
+rookworld-inspect = "rookworld_trl.inspect:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rookworld_trl"]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "--verbose"
