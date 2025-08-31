@@ -10,6 +10,7 @@ import logging
 from typing import List, Tuple, Dict, Optional
 from datasets import load_dataset
 import random
+from .utils import normalize_spacing
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,10 @@ def parse_p_task(text: str) -> Tuple[str, str, Dict]:
         fen = prompt[3:].strip() if prompt.startswith("P: ") else ""
         parsed_data['fen'] = fen
     
+    # Normalize spacing to prevent KL divergence inflation
+    prompt = normalize_spacing(prompt)
+    completion = normalize_spacing(completion) if completion else completion
+    
     logger.debug(f"Parsed P: task - prompt: {prompt[:50]}..., completion: {completion[:50] if completion else 'None'}")
     
     return prompt, completion, parsed_data
@@ -183,6 +188,10 @@ def parse_a_task(text: str) -> Tuple[str, str, Dict, bool]:
         # Malformed task - return as invalid
         logger.debug(f"Malformed A: task with {len(components)} components - skipping")
         return "", "", {}, False  # Mark as invalid
+    
+    # Normalize spacing to prevent KL divergence inflation
+    prompt = normalize_spacing(prompt)
+    completion = normalize_spacing(completion) if completion else completion
     
     logger.debug(f"Parsed A: task - prompt: {prompt[:50]}..., completion: {completion[:50] if completion else 'None'}")
     

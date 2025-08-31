@@ -13,6 +13,7 @@ import time
 import shutil
 import os
 from functools import lru_cache
+from .utils import normalize_spacing
 
 
 def find_stockfish_path() -> Optional[str]:
@@ -742,6 +743,9 @@ def create_reward_function(stockfish_path: Optional[str] = None):
         Returns:
             List of reward scores for each completion
         """
+        # Normalize spacing in completions to prevent KL divergence inflation
+        normalized_completions = [normalize_spacing(completion) for completion in completions]
+        
         # Extract prompts from kwargs if available, otherwise create dummy prompts
         prompts = kwargs.get("prompts", None)
         if prompts is None:
@@ -754,6 +758,6 @@ def create_reward_function(stockfish_path: Optional[str] = None):
             prompts = prompts * (len(completions) // len(prompts) + 1)
             prompts = prompts[:len(completions)]
         
-        return scorer.score_responses(prompts, completions)
+        return scorer.score_responses(prompts, normalized_completions)
     
     return reward_function

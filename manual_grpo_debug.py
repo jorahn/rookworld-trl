@@ -18,6 +18,7 @@ import random
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from src.rookworld_trl.rewards import create_reward_function
 from src.rookworld_trl.dataset import RookWorldDataGenerator
+from src.rookworld_trl.utils import normalize_spacing
 import copy
 
 # Set deterministic behavior
@@ -223,7 +224,10 @@ def manual_grpo_single_batch():
             full_sequence = outputs.sequences[j]
             completion_tokens = full_sequence[prompt_length:]
             completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-            prompt_completions.append(completion_text)
+            
+            # Normalize spacing to prevent KL divergence inflation
+            completion_text_normalized = normalize_spacing(completion_text)
+            prompt_completions.append(completion_text_normalized)
             
             # Calculate log probabilities with training model
             with torch.no_grad():
@@ -259,6 +263,7 @@ def manual_grpo_single_batch():
             
             print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
             print(f"           Text: {completion_text[:60]}...")
+            print(f"           Normalized: {completion_text_normalized[:60]}...")
         
         all_completions.append(prompt_completions)
         all_log_probs.append(prompt_log_probs)
@@ -377,15 +382,21 @@ def manual_grpo_single_batch():
     ):
         print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
         
-        inputs = tokenizer(prompt, return_tensors="pt").to(training_model.device)
+        # Use normalized prompt for consistent tokenization
+        normalized_prompt = normalize_spacing(prompt)
+        inputs = tokenizer(normalized_prompt, return_tensors="pt").to(training_model.device)
         prompt_length = inputs.input_ids.shape[1]
         
         prompt_pg_loss = 0.0
         prompt_kl_loss = 0.0
         
         for j, (completion, advantage) in enumerate(zip(completions, advantages)):
-            # Tokenize full sequence (prompt + completion)
-            full_text = prompt + completion
+            # Normalize prompt and completion for consistent tokenization
+            normalized_prompt = normalize_spacing(prompt)
+            normalized_completion = normalize_spacing(completion)
+            
+            # Tokenize full sequence (normalized prompt + normalized completion)  
+            full_text = normalized_prompt + " " + normalized_completion
             full_tokens = tokenizer(full_text, return_tensors="pt").to(training_model.device)
             
             # Forward pass through training model (WITH gradients)
