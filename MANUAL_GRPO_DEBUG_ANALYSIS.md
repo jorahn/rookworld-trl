@@ -4,6 +4,31 @@
 
 The `manual_grpo_debug.py` script is a detailed implementation of a single GRPO (Group Relative Policy Optimization) training step, designed to debug and understand why the pretrained model's performance degrades during training. This analysis breaks down every component, parameter choice, and calculation to identify potential issues in the GRPO training pipeline.
 
+## ⚠️ Important Technical Corrections
+
+**Note**: This document analyzes a manual GRPO implementation that contains some deviations from TRL's exact GRPO algorithm. The manual implementation demonstrates GRPO principles but may not exactly match TRL training dynamics due to the following key differences:
+
+### Key Technical Differences from TRL GRPO
+
+1. **KL Divergence Calculation**: 
+   - **Manual Implementation**: Uses `(tok_logp_pol - tok_logp_ref).mean()` 
+   - **TRL's GRPO**: Uses f-divergence surrogate `exp(ref_logp - pol_logp) - (ref_logp - pol_logp) - 1`
+   - **Impact**: Different magnitude and gradient properties for KL penalty
+
+2. **Policy Gradient Term**: 
+   - **Manual Implementation**: Sequence-level REINFORCE `-advantage * seq_logprob`
+   - **TRL's GRPO**: Per-token likelihood ratio approach with token weighting
+   - **Impact**: Different variance properties in gradient estimation
+
+3. **Length Normalization**: 
+   - **Manual Implementation**: Simple division by sequence length `sum() / Tgen`
+   - **TRL's GRPO**: Masked token normalization `sum(loss*mask) / sum(mask)`
+   - **Impact**: Different handling of variable-length sequences
+
+4. **Shape Handling Bug**: The manual implementation contains a tensor gather operation that may cause shape mismatches in log probability extraction.
+
+These differences mean the manual implementation serves as a conceptual demonstration of GRPO mechanics rather than an exact TRL replica.
+
 ## Phase-by-Phase Analysis
 
 ### Phase 1: Setup and Configuration
@@ -179,17 +204,26 @@ advantages_normalized = advantages_tensor / std_expanded
 
 #### Key Corrections from Review
 
-**1. Token-Level KL with Gradients**:
+**1. KL Divergence Implementation**:
 ```python
-seq_kl = (tok_logp_pol - tok_logp_ref).mean()  # Token-level KL (with gradients!)
+seq_kl = (tok_logp_pol - tok_logp_ref).mean()  # Simplified KL approximation
 ```
-**Critical**: KL calculation maintains gradients for the policy model while reference model is detached.
+**Note**: This is a simplified approximation. TRL's actual GRPO uses an f-divergence surrogate:
+```python
+# TRL's approach:
+per_token_kl = torch.exp(ref_logp - pol_logp) - (ref_logp - pol_logp) - 1
+```
+The manual implementation's approach changes both the magnitude and gradients of the KL penalty compared to TRL.
 
 **2. Length Normalization**:
 ```python
-seq_logprob = tok_logp_pol.sum() / Tgen  # Normalized by length
+seq_logprob = tok_logp_pol.sum() / Tgen  # Simple length normalization
 ```
-**Why**: Prevents bias toward shorter completions in the policy gradient term.
+**Note**: This is a simplified approach. TRL normalizes by the number of valid (non-masked) completion tokens:
+```python
+# TRL's approach:
+loss = (loss_tokens * completion_mask).sum() / completion_mask.sum()
+```
 
 **3. Proper Sequence Alignment**:
 ```python
@@ -198,14 +232,27 @@ targets = full_tokens.input_ids[0][prompt_length:completion_end+1]
 ```
 **Critical**: Ensures logits at position i predict token at position i+1.
 
+**4. Tensor Shape Handling**:
+```python
+# Manual implementation has a shape bug in gather operation:
+token_log_probs = completion_log_probs.gather(1, completion_tokens.unsqueeze(0)).squeeze()
+# Correct form should be:
+token_log_probs = completion_log_probs.gather(dim=1, index=completion_tokens.unsqueeze(1)).squeeze(1)
+```
+
 #### GRPO Loss Components
 
 **Policy Gradient Term**:
 ```python
-pg_term = -advantage * seq_logprob
+pg_term = -advantage * seq_logprob  # Sequence-level REINFORCE
 ```
-- Negative sign: Increase probability of high-advantage actions
-- Length normalization prevents short completion bias
+**Note**: This uses standard REINFORCE. TRL's GRPO uses a per-token likelihood ratio approach:
+```python
+# TRL's approach:
+token_weight = exp(per_token_logps - per_token_logps.detach())
+per_token_pg = -token_weight * advantages.unsqueeze(1)
+```
+Both are valid policy gradient estimators but have different variance properties.
 
 **KL Regularization Term**:
 ```python
@@ -255,7 +302,7 @@ sample_loss = pg_term + kl_term
 ```python
 kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
 ```
-- Healthy ratio: 10-30% KL contribution
+**Note**: The "10-30% KL contribution" is a heuristic guideline, not a canonical standard. TRL typically uses adaptive KL (tuning β to track a target KL divergence) rather than maintaining a fixed loss ratio.
 - Too high: KL dominates, learning is overly conservative
 - Too low: Insufficient regularization, potential overfitting
 
@@ -274,9 +321,9 @@ kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
 
 ### 2. KL Divergence Implementation
 
-**Current Choice**: Token-level KL with gradient flow through policy model
-**Alternative**: Sequence-level KL without gradients
-**Impact**: Token-level provides finer control and proper gradients for regularization.
+**Current Choice**: Simplified KL approximation `(tok_logp_pol - tok_logp_ref).mean()`
+**TRL's Choice**: F-divergence surrogate `exp(ref_logp - pol_logp) - (ref_logp - pol_logp) - 1`
+**Impact**: TRL's approach provides better approximation properties for small policy shifts and matches theoretical GRPO formulation.
 
 ### 3. Length Normalization
 
@@ -336,4 +383,35 @@ kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
 3. **Performance Degradation**: Overfitting → reduce learning rate or increase beta
 4. **Reward Function Errors**: Dummy scores used → fix reward function implementation
 
-This manual implementation serves as a gold standard for validating the automated TRL training pipeline and identifying specific points of failure in the GRPO algorithm.
+This manual implementation serves as a conceptual demonstration of GRPO mechanics and can be used to understand the algorithm's components, though it differs from TRL's exact implementation.
+
+## TRL-Correct Implementation Snippets
+
+For reference, here are the corrected implementations that would match TRL's GRPO:
+
+### Corrected Per-Token Log Probability Extraction
+```python
+# For logits [L, V] over prompt+completion; ids [L]
+lp = F.log_softmax(logits[:-1], dim=-1)                      # [L-1, V]
+tok_lp = lp.gather(dim=1, index=ids[1:].unsqueeze(1)).squeeze(1)  # [L-1]
+tok_lp = tok_lp[prompt_len-1:]                               # keep completion part
+```
+
+### TRL-Style KL + Loss Calculation
+```python
+# Per-token KL using f-divergence surrogate
+per_token_kl = torch.exp(ref_tok_lp - tok_lp) - (ref_tok_lp - tok_lp) - 1
+
+# Per-token policy gradient with likelihood ratio
+per_token_pg = -torch.exp(tok_lp - tok_lp.detach()) * advantage  # broadcast over tokens
+
+# Combined loss with proper masking
+loss_tokens = per_token_pg + beta * per_token_kl
+loss = (loss_tokens * completion_mask).sum() / completion_mask.sum()
+```
+
+### Key Advantages of TRL's Approach
+1. **F-divergence KL**: Better approximation for small policy changes
+2. **Per-token weighting**: Lower variance gradient estimates
+3. **Proper masking**: Correct handling of variable-length sequences
+4. **Numerical stability**: Robust to edge cases in tokenization
