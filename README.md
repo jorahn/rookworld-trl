@@ -1,17 +1,17 @@
-# RookWorld TRL - Production GRPO Chess Training
+# RookWorld TRL - Experimental GRPO Chess Training
 
-A **production-ready** implementation of **Group Relative Policy Optimization (GRPO)** for chess using HuggingFace Transformers and TRL, featuring optimized batch sizes, stability improvements, and comprehensive monitoring.
+An **experimental implementation** of **Group Relative Policy Optimization (GRPO)** for chess using HuggingFace Transformers and TRL. This project explores GRPO training dynamics, debugging model degradation issues, and optimizing parameters for chess language models.
 
 ## 🎯 Overview
 
-This package delivers **stable, high-performance GRPO training** for chess language models with:
+This experimental package explores **GRPO training for chess language models** with:
 
 - **🏆 Chess-Accurate Rewards**: Sophisticated Stockfish-based evaluation system  
 - **📊 Mixed Task Learning**: Both Policy (P:) and Environment (A:) tasks from RookWorld dataset
 - **⚡ Optimized Performance**: Batch size 16, BF16 precision, efficient Stockfish integration
-- **🛡️ Training Stability**: Gradient clipping, learning rate warmup, data quality validation
-- **📈 Comprehensive Monitoring**: Tensorboard logging, frequent checkpoints, detailed metrics
-- **🔧 Production Ready**: Self-contained package with battle-tested defaults
+- **🛡️ Experimental Stability**: Gradient clipping, learning rate warmup, data quality validation
+- **📈 Research Monitoring**: Tensorboard logging, frequent checkpoints, detailed metrics
+- **🔬 Learning-Focused**: Manual debugging tools and algorithmic analysis
 
 ## 🚀 Quick Start
 
@@ -25,20 +25,20 @@ uv sync
 sudo apt install stockfish
 ```
 
-### Training
+### Experimental Training
 
 ```bash
-# Production training (recommended) - optimized + stable
+# Experimental GRPO training with optimized parameters
 ./train.sh
 
 # Monitor training progress
-tensorboard --logdir grpo_output/runs
+tensorboard --logdir grpo_output_*/runs
 
-# Extra stable training for difficult setups
+# Conservative training for stability testing
 uv run rookworld-train --stable
 
-# Custom training parameters
-uv run rookworld-train --batch_size 8 --learning_rate 5e-6 --stable
+# Custom parameter exploration
+uv run rookworld-train --batch_size 8 --learning_rate 5e-6 --beta 0.2
 ```
 
 ### Testing & Inspection
@@ -75,20 +75,20 @@ uv run python manual_grpo_debug.py
 - **Learning Rate Warmup**: 100 steps for stable training initialization
 - **Conservative Mode**: `--stable` flag for extra stability (LR=1e-6, beta=0.2)
 
-## 📊 Training Configuration
+## 📊 Experimental Configuration
 
-### Default Settings (Optimized + Stable)
+### Current Experimental Settings
 ```bash
-Batch size: 16              # Optimal for RTX 4090 (4x improvement)
-Dataset size: 5000 samples  # Substantial training data
-Learning rate: 1e-6         # Optimal for chess knowledge preservation
-Beta (KL penalty): 0.1      # Optimal KL/PG balance from testing
-Temperature: 0.5            # Focused sampling vs TRL default 1.0
-Top-p: 0.9                  # Nucleus sampling vs TRL default 1.0
-Gradient clipping: 1.0      # Stability protection
-Warmup steps: 100          # Stable initialization
-Evaluation: every 100 steps # Frequent monitoring
-Tensorboard: enabled       # Full metrics tracking
+Batch size: 16              # Tested optimal for RTX 4090
+Dataset size: 5000 samples  # For substantial experiments  
+Learning rate: 1e-6         # Found to preserve chess knowledge
+Beta (KL penalty): 0.1      # Experimentally determined balance
+Temperature: 0.5            # Prevents gibberish vs TRL default 1.0
+Top-p: 0.9                  # Quality control vs TRL default 1.0
+Gradient clipping: 1.0      # Prevents training instability
+Warmup steps: 100          # Helps training stability
+Evaluation: every 100 steps # For monitoring experiments
+Tensorboard: enabled       # Research tracking
 ```
 
 ### Stability Features
@@ -119,26 +119,26 @@ tensorboard --logdir grpo_output/runs
 # - completion quality metrics
 ```
 
-### Key Indicators
-- **Healthy Training**: Loss decreases steadily, rewards improve
-- **Stability Issues**: Large loss spikes, high gradient norms
-- **Convergence**: Stable loss around 0.5-2.0 after 500+ steps
+### Experimental Indicators
+- **Successful experiments**: Loss decreases steadily, rewards improve
+- **Training issues**: Large loss spikes, high gradient norms
+- **Interesting results**: Stable loss around 0.5-2.0 after 500+ steps
 
 ## 🔧 Advanced Usage
 
-### Custom Training Configurations
+### Experimental Configurations
 
 ```bash
-# High-performance training
+# High-throughput experiments
 BATCH_SIZE=24 LEARNING_RATE=2e-5 ./train.sh
 
-# Ultra-stable training  
+# Conservative parameter testing
 uv run rookworld-train --stable --learning_rate 5e-7 --warmup_steps 300
 
-# Large-scale training
+# Large dataset experiments  
 DATASET_SIZE=10000 BATCH_SIZE=32 ./train.sh
 
-# Development/testing
+# Quick testing/debugging
 DATASET_SIZE=100 BATCH_SIZE=4 ./train.sh
 ```
 
@@ -174,14 +174,14 @@ uv run rookworld-train --temperature 0.5 --top_p 0.9
 - Reduce learning rate or increase warmup steps
 - Consider lower batch size if memory constrained
 
-**For debugging GRPO training issues:**
+**For researching GRPO training dynamics:**
 ```bash
-# Step-by-step manual GRPO analysis
+# Step-by-step manual GRPO analysis (experimental debugging)
 uv run python manual_grpo_debug.py
 
-# Compare before/after model performance
-# Analyze reward calculation, advantages, and gradient updates
-# Identify where pretrained model performance is lost
+# Research model behavior changes during training
+# Analyze reward calculation, advantages, and gradient updates  
+# Explore where and why pretrained model performance changes
 ```
 
 ## 📊 Reward System Example
@@ -201,21 +201,23 @@ response = "M: e2e4 d2d4 g1f3 E: 30 35 28 B: e2e4"
 ## 🎮 Package Commands
 
 ### Training Commands
-- `rookworld-train`: Main GRPO training with all stability features
-- `./train.sh`: Convenience script with production defaults
+- `rookworld-train`: Main GRPO training with experimental features
+- `./train.sh`: Convenience script with tested parameters
 
-### Analysis Commands  
-- `rookworld-inspect`: Reward function debugging and batch analysis
+### Research Commands  
+- `rookworld-inspect`: Reward function analysis and batch debugging
 - `python example.py`: Package functionality demonstration
+- `python manual_grpo_debug.py`: Step-by-step algorithm analysis
 
-### Key Parameters
-- `--stable`: Ultra-conservative training (prevents instability)
-- `--tensorboard`: Enable comprehensive metrics logging
+### Experimental Parameters
+- `--stable`: Conservative mode for stability experiments
+- `--tensorboard`: Enable metrics logging for analysis
 - `--eval_steps`: Evaluation frequency (default: 100)
 - `--max_grad_norm`: Gradient clipping threshold (default: 1.0)
 - `--warmup_steps`: Learning rate warmup duration (default: 100)
-- `--temperature`: Generation temperature (default: 0.5, focused sampling)
+- `--temperature`: Generation temperature (default: 0.5, experimentally tuned)
 - `--top_p`: Nucleus sampling threshold (default: 0.9)
+- `--beta`: KL penalty coefficient (default: 0.1, found optimal)
 
 ## 🔧 Debugging Tools
 
@@ -246,4 +248,4 @@ MIT License - See LICENSE file for details.
 
 ---
 
-**Ready for production chess language model training with optimal performance and stability! 🚀**
+**Experimental GRPO training setup for exploring chess language model optimization! 🧪**
