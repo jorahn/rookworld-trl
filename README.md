@@ -52,6 +52,9 @@ uv run rookworld-inspect --batch_size 4
 
 # Debug reward calculations
 uv run rookworld-inspect --batch_size 2 --model_name jrahn/RookWorld-LM-124M
+
+# Manual GRPO debugging (step-by-step analysis)
+uv run python manual_grpo_debug.py
 ```
 
 ## 🏗️ Architecture
@@ -158,12 +161,25 @@ uv run rookworld-train --stable
 
 # Or manually set conservative parameters
 uv run rookworld-train --learning_rate 1e-6 --max_grad_norm 0.3 --warmup_steps 300
+
+# Adjust generation parameters for better completion quality
+uv run rookworld-train --temperature 0.5 --top_p 0.9
 ```
 
 **If loss spikes occur:**
 - Check tensorboard for gradient norm spikes
 - Reduce learning rate or increase warmup steps
 - Consider lower batch size if memory constrained
+
+**For debugging GRPO training issues:**
+```bash
+# Step-by-step manual GRPO analysis
+uv run python manual_grpo_debug.py
+
+# Compare before/after model performance
+# Analyze reward calculation, advantages, and gradient updates
+# Identify where pretrained model performance is lost
+```
 
 ## 📊 Reward System Example
 
@@ -195,6 +211,31 @@ response = "M: e2e4 d2d4 g1f3 E: 30 35 28 B: e2e4"
 - `--eval_steps`: Evaluation frequency (default: 100)
 - `--max_grad_norm`: Gradient clipping threshold (default: 1.0)
 - `--warmup_steps`: Learning rate warmup duration (default: 100)
+- `--temperature`: Generation temperature (default: 0.5, focused sampling)
+- `--top_p`: Nucleus sampling threshold (default: 0.9)
+
+## 🔧 Debugging Tools
+
+### Manual GRPO Analysis
+The `manual_grpo_debug.py` script provides step-by-step analysis of the GRPO training process:
+
+```bash
+# Run detailed GRPO debugging
+uv run python manual_grpo_debug.py
+```
+
+**What it analyzes:**
+- Model performance before/after GRPO steps
+- Completion generation quality and diversity
+- Reward calculation and advantage computation  
+- KL divergence and policy gradient calculations
+- Exact loss breakdown and gradient updates
+
+**Use cases:**
+- Debugging why pretrained model performance degrades during training
+- Analyzing reward distributions and advantage calculations
+- Identifying optimal generation parameters (temperature, top_p)
+- Comparing manual implementation with TRL training logs
 
 ## 📄 License
 

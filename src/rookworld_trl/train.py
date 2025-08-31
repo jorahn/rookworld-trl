@@ -34,13 +34,13 @@ class TrainingConfig:
     
     # Training parameters
     num_train_epochs: int = 1
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-6  # Increased from 1e-7
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
     max_length: int = 256
     
     # GRPO specific
-    beta: float = 0.1  # KL penalty coefficient
+    beta: float = 1.0  # Higher KL penalty to prevent catastrophic forgetting
     num_generations: int = 4  # Number of completions per prompt (group size)
     max_completion_length: int = 256  # Max length for generated completions (minimum 144)
     
@@ -58,6 +58,10 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     warmup_steps: int = 100
     stable: bool = False
+    
+    # Generation parameters
+    temperature: float = 0.5  # Lower temperature for focused sampling
+    top_p: float = 0.9        # Nucleus sampling
     
     # Stockfish path (optional - will auto-detect if None)
     stockfish_path: Optional[str] = None
@@ -111,6 +115,8 @@ def main():
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping threshold")
     parser.add_argument("--warmup_steps", type=int, default=100, help="Learning rate warmup steps")
     parser.add_argument("--stable", action="store_true", help="Use stable training configuration")
+    parser.add_argument("--temperature", type=float, default=0.5, help="Generation temperature (lower for focused sampling)")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus sampling top_p")
     
     args = parser.parse_args()
     
@@ -152,6 +158,8 @@ def main():
         max_grad_norm=args.max_grad_norm,
         warmup_steps=args.warmup_steps,
         stable=args.stable,
+        temperature=args.temperature,
+        top_p=args.top_p,
     )
     
     print("=" * 80)
@@ -222,7 +230,9 @@ def main():
         logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
         max_steps=max(1, len(train_dataset) // config.batch_size) if len(train_dataset) < 1000 else -1,
         max_grad_norm=config.max_grad_norm,
-        warmup_steps=config.warmup_steps
+        warmup_steps=config.warmup_steps,
+        temperature=config.temperature,
+        top_p=config.top_p
     )
     
     # Initialize trainer
