@@ -3,15 +3,40 @@
 Manual GRPO implementation with extensive logging to debug the training process
 This script manually performs all GRPO steps for a single batch to understand
 where the pretrained model performance is being degraded.
+
+Fixed based on REWIEW.md:
+- Proper token-level KL divergence with gradients
+- Model state management (freeze reference, eval mode for generation)
+- Length normalization to prevent bias
+- Deterministic execution with proper seeding
 """
 
 import torch
 import torch.nn.functional as F
 import numpy as np
+import random
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from src.rookworld_trl.rewards import create_reward_function
 from src.rookworld_trl.dataset import RookWorldDataGenerator
 import copy
+
+# Set deterministic behavior
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+
+def generate_eval(model, **kwargs):
+    """Generate in eval mode to eliminate dropout randomness, restore previous mode"""
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        outputs = model.generate(**kwargs)
+    if was_training:
+        model.train()
+    return outputs
 
 def manual_grpo_single_batch():
     """
@@ -72,6 +97,11 @@ def manual_grpo_single_batch():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
+    # Properly freeze the reference model
+    reference_model.eval()
+    for p in reference_model.parameters():
+        p.requires_grad = False
+    
     print(f"✅ Loaded reference model (frozen) and training model")
     
     # Create reward function
@@ -101,16 +131,16 @@ def manual_grpo_single_batch():
         for i, prompt in enumerate(prompts):
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
             
-            with torch.no_grad():
-                outputs = model.generate(
-                    inputs.input_ids,
-                    max_new_tokens=max_new_tokens,
-                    num_return_sequences=2,  # Fewer for speed
-                    do_sample=True,
-                    temperature=0.8,
-                    top_p=0.9,
-                    pad_token_id=tokenizer.eos_token_id,
-                )
+            outputs = generate_eval(
+                model,
+                input_ids=inputs.input_ids,
+                max_new_tokens=max_new_tokens,
+                num_return_sequences=2,  # Fewer for speed
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.9,
+                pad_token_id=tokenizer.eos_token_id,
+            )
             
             prompt_len = inputs.input_ids.shape[1]
             completions = []
@@ -169,19 +199,19 @@ def manual_grpo_single_batch():
         inputs = tokenizer(prompt, return_tensors="pt").to(training_model.device)
         prompt_length = inputs.input_ids.shape[1]
         
-        # Generate completions with exact TRL parameters
-        with torch.no_grad():
-            outputs = training_model.generate(
-                inputs.input_ids,
-                max_new_tokens=max_new_tokens,
-                num_return_sequences=num_generations,
-                do_sample=True,
-                temperature=temperature,  # Focused sampling (0.5)
-                top_p=top_p,             # Nucleus sampling (0.9)
-                pad_token_id=tokenizer.eos_token_id,
-                return_dict_in_generate=True,
-                output_scores=True
-            )
+        # Generate completions in eval mode for consistency
+        outputs = generate_eval(
+            training_model,
+            input_ids=inputs.input_ids,
+            max_new_tokens=max_new_tokens,
+            num_return_sequences=num_generations,
+            do_sample=True,
+            temperature=temperature,  # Focused sampling (0.5)
+            top_p=top_p,             # Nucleus sampling (0.9)
+            pad_token_id=tokenizer.eos_token_id,
+            return_dict_in_generate=True,
+            output_scores=True
+        )
         
         # Extract completions and calculate log probabilities
         prompt_completions = []
@@ -313,119 +343,114 @@ def manual_grpo_single_batch():
         print(f"  Prompt {i+1}: {[f'{a:+.3f}' for a in advantages]}")
         
         advantage_range = max(advantages) - min(advantages)
+        advantage_mean = np.mean(advantages)
+        advantage_std = np.std(advantages)
+        
+        print(f"    Stats: mean={advantage_mean:+.3f} (expect ≈0), std={advantage_std:.3f} (expect >0)")
+        
         if advantage_range < 0.01:
             print(f"    ⚠️  Very small range ({advantage_range:.4f}) - little learning signal!")
         else:
             print(f"    ✅ Good range ({advantage_range:.3f}) - clear learning signal")
-    
-    # ============================================================================
-    # PHASE 6: KL DIVERGENCE CALCULATION
-    # ============================================================================
-    print(f"\n{'='*20} PHASE 6: KL DIVERGENCE CALCULATION {'='*20}")
-    
-    total_kl_div = 0.0
-    
-    for i, (train_log_probs, ref_log_probs) in enumerate(zip(all_log_probs, all_ref_log_probs)):
-        print(f"\n🎯 Prompt {i+1} - KL Divergence:")
-        
-        prompt_kl = 0.0
-        for j, (train_lp, ref_lp) in enumerate(zip(train_log_probs, ref_log_probs)):
-            # KL divergence approximation: difference in log probabilities
-            kl_contrib = abs(train_lp - ref_lp)
-            prompt_kl += kl_contrib
             
-            print(f"  Gen {j+1}: KL = |{train_lp:.1f} - {ref_lp:.1f}| = {kl_contrib:.2f}")
-        
-        avg_kl = prompt_kl / num_generations
-        total_kl_div += avg_kl
-        print(f"  📊 Prompt KL average: {avg_kl:.2f}")
-    
-    batch_avg_kl = total_kl_div / batch_size
-    kl_penalty = beta * batch_avg_kl
-    
-    print(f"\n📊 Overall KL Results:")
-    print(f"  Batch average KL: {batch_avg_kl:.2f}")
-    print(f"  KL penalty (beta * KL): {kl_penalty:.2f}")
+        if abs(advantage_mean) > 0.1:
+            print(f"    ⚠️  Mean far from zero - check advantage calculation!")
+        if advantage_std < 0.01:
+            print(f"    ⚠️  Very low std - insufficient reward diversity!")
     
     # ============================================================================
-    # PHASE 7: POLICY GRADIENT CALCULATION
+    # PHASE 6-8: CORRECTED GRPO LOSS CALCULATION WITH PROPER KL
     # ============================================================================
-    print(f"\n{'='*20} PHASE 7: POLICY GRADIENT CALCULATION {'='*20}")
+    print(f"\n{'='*20} PHASE 6-8: CORRECTED GRPO LOSS CALCULATION {'='*20}")
     
-    total_pg_loss = 0.0
-    
-    # Enable gradients
+    # Enable gradients for training model
     training_model.train()
     optimizer.zero_grad()
     
-    for i, (prompt, completions, advantages, log_probs) in enumerate(
-        zip(prompts, all_completions, all_advantages, all_log_probs)
+    total_pg_loss = 0.0
+    total_kl_loss = 0.0
+    
+    print(f"🔄 Computing GRPO loss with proper token-level KL...")
+    
+    for i, (prompt, completions, advantages) in enumerate(
+        zip(prompts, all_completions, all_advantages)
     ):
-        print(f"\n🎯 Prompt {i+1} - Policy Gradient:")
+        print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
         
         inputs = tokenizer(prompt, return_tensors="pt").to(training_model.device)
         prompt_length = inputs.input_ids.shape[1]
         
         prompt_pg_loss = 0.0
+        prompt_kl_loss = 0.0
         
         for j, (completion, advantage) in enumerate(zip(completions, advantages)):
             # Tokenize full sequence (prompt + completion)
             full_text = prompt + completion
             full_tokens = tokenizer(full_text, return_tensors="pt").to(training_model.device)
             
-            # Forward pass through training model
+            # Forward pass through training model (WITH gradients)
             outputs = training_model(full_tokens.input_ids)
             logits = outputs.logits[0]
             
-            # Calculate log probabilities for completion tokens
+            # Completion span
             completion_start = prompt_length - 1
             completion_end = full_tokens.input_ids.shape[1] - 1
             
             if completion_end > completion_start:
-                completion_logits = logits[completion_start:completion_end]
-                completion_targets = full_tokens.input_ids[0][prompt_length:completion_end+1]
+                targets = full_tokens.input_ids[0][prompt_length:completion_end+1]
+                Tgen = len(targets)
                 
-                log_probs = F.log_softmax(completion_logits, dim=-1)
-                token_log_probs = log_probs.gather(1, completion_targets.unsqueeze(1)).squeeze()
+                # Policy logits and log-probs (WITH gradients)
+                pol_logits = logits[completion_start:completion_end]  # [Tgen, V]
+                pol_logp = F.log_softmax(pol_logits, dim=-1)
+                tok_logp_pol = pol_logp.gather(1, targets.unsqueeze(1)).squeeze()  # [Tgen]
                 
-                sequence_log_prob = token_log_probs.sum()
+                # Reference pass (NO gradients)
+                with torch.no_grad():
+                    ref_out = reference_model(full_tokens.input_ids)
+                    ref_logits = ref_out.logits[0][completion_start:completion_end]  # [Tgen, V]
+                    ref_logp = F.log_softmax(ref_logits, dim=-1)
+                    tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()  # [Tgen]
                 
-                # Policy gradient loss: -advantage * log_prob
-                pg_loss = -advantage * sequence_log_prob
-                prompt_pg_loss += pg_loss
+                # Length-normalized terms (CRITICAL FIX from review)
+                seq_logprob = tok_logp_pol.sum() / Tgen  # Normalized by length
+                seq_kl = (tok_logp_pol - tok_logp_ref).mean()  # Token-level KL (with gradients!)
                 
-                print(f"  Gen {j+1}: advantage={advantage:+.3f} * log_prob={sequence_log_prob:.1f} = loss={pg_loss:.2f}")
+                # GRPO loss: -A * logp + β * KL (BOTH with gradients)
+                pg_term = -advantage * seq_logprob
+                kl_term = beta * seq_kl
+                sample_loss = pg_term + kl_term
+                
+                prompt_pg_loss += pg_term
+                prompt_kl_loss += kl_term
+                
+                print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}")
+                print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, total={sample_loss:.3f}")
             else:
                 print(f"  Gen {j+1}: Empty completion - skipping")
         
-        avg_prompt_loss = prompt_pg_loss / num_generations if num_generations > 0 else 0
-        total_pg_loss += avg_prompt_loss
+        avg_prompt_pg = prompt_pg_loss / num_generations
+        avg_prompt_kl = prompt_kl_loss / num_generations
+        total_pg_loss += avg_prompt_pg
+        total_kl_loss += avg_prompt_kl
         
-        print(f"  📊 Prompt PG loss: {avg_prompt_loss:.2f}")
+        print(f"  📊 Prompt averages: PG={avg_prompt_pg:.3f}, KL={avg_prompt_kl:.3f}")
     
+    # Average losses across batch
     avg_pg_loss = total_pg_loss / batch_size
+    avg_kl_loss = total_kl_loss / batch_size
+    total_loss = avg_pg_loss + avg_kl_loss
     
-    # ============================================================================
-    # PHASE 8: TOTAL LOSS AND GRADIENT UPDATE
-    # ============================================================================
-    print(f"\n{'='*20} PHASE 8: LOSS & GRADIENT UPDATE {'='*20}")
-    
-    # Total loss = policy gradient loss + KL penalty
-    total_loss = avg_pg_loss + kl_penalty
-    
-    print(f"🔢 Loss Breakdown:")
-    print(f"  Policy Gradient Loss: {avg_pg_loss:8.2f}")
-    print(f"  KL Penalty:          +{kl_penalty:8.2f}")
-    print(f"  Total Loss:          ={total_loss:8.2f}")
+    print(f"\n🔢 CORRECTED Loss Breakdown:")
+    print(f"  Policy Gradient Loss: {avg_pg_loss:8.3f}")
+    print(f"  KL Loss (with gradients): {avg_kl_loss:8.3f}")
+    print(f"  Total Loss:          ={total_loss:8.3f}")
     print(f"")
-    print(f"  KL penalty ratio: {kl_penalty/(abs(total_loss) + 1e-8)*100:.1f}%")
+    kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
+    print(f"  KL penalty ratio: {kl_ratio:.1f}%")
     
-    # Backward pass
-    print(f"\n🔄 Performing gradient update...")
-    if isinstance(total_loss, (int, float)):
-        # Convert to tensor if needed
-        total_loss = torch.tensor(total_loss, requires_grad=True)
-    
+    # Backward pass with proper gradients
+    print(f"\n🔄 Performing corrected gradient update...")
     if total_loss.requires_grad:
         total_loss.backward()
         
@@ -444,7 +469,7 @@ def manual_grpo_single_batch():
         
         # Optimizer step
         optimizer.step()
-        print(f"  ✅ Gradient update applied")
+        print(f"  ✅ Gradient update applied with proper KL regularization")
     else:
         print(f"  ⚠️  No gradients to update")
     
@@ -463,31 +488,48 @@ def manual_grpo_single_batch():
     
     performance_change = post_performance - initial_performance
     
-    print(f"🔍 Single GRPO Step Impact:")
+    print(f"🔍 Corrected GRPO Step Impact:")
     print(f"  Initial performance: {initial_performance:.4f}")
     print(f"  Post-update performance: {post_performance:.4f}")
     print(f"  Performance change: {performance_change:+.4f}")
     
     if performance_change < -0.05:
-        print(f"  🚨 SIGNIFICANT PERFORMANCE DEGRADATION!")
-        print(f"     Single GRPO step damaged the model")
+        print(f"  🚨 PERFORMANCE DEGRADATION!")
+        print(f"     Corrected GRPO still damages the model - deeper issue exists")
     elif performance_change > 0.05:
         print(f"  ✅ PERFORMANCE IMPROVEMENT!")
-        print(f"     GRPO step helped the model")
+        print(f"     Corrected GRPO step helped the model")
     else:
-        print(f"  ➡️  Minimal change - stable update")
+        print(f"  ➡️  Minimal change - stable update (GOOD!)")
     
     # Compare with training logs
     training_avg_reward = -0.207
     print(f"\n📊 Comparison with Training Logs:")
-    print(f"  Manual single step result: {post_performance:.4f}")
+    print(f"  Corrected manual result: {post_performance:.4f}")
     print(f"  Training log average: {training_avg_reward:.4f}")
     print(f"  Difference: {post_performance - training_avg_reward:.4f}")
     
     if abs(post_performance - training_avg_reward) < 0.1:
-        print(f"  🎯 Manual step reproduces training behavior!")
+        print(f"  🎯 Corrected manual reproduces training behavior!")
+        print(f"     → Training issue confirmed in algorithm implementation")
     else:
-        print(f"  ❓ Manual step behavior differs from training logs")
+        print(f"  ✅ Corrected manual behavior differs from training logs")
+        print(f"     → Previous training used buggy implementation")
+    
+    # Analysis of KL regularization effectiveness
+    kl_magnitude = abs(avg_kl_loss)
+    pg_magnitude = abs(avg_pg_loss)
+    
+    print(f"\n🔍 KL Regularization Analysis:")
+    print(f"  KL magnitude: {kl_magnitude:.3f}")
+    print(f"  PG magnitude: {pg_magnitude:.3f}")
+    
+    if kl_magnitude > pg_magnitude * 10:
+        print(f"  ⚠️  KL dominates - consider lowering beta")
+    elif kl_magnitude < pg_magnitude * 0.1:
+        print(f"  ⚠️  KL too weak - consider increasing beta")
+    else:
+        print(f"  ✅ KL and PG balanced - good regularization")
     
     return {
         'initial_performance': initial_performance,
@@ -495,7 +537,7 @@ def manual_grpo_single_batch():
         'performance_change': performance_change,
         'total_loss': total_loss.item() if hasattr(total_loss, 'item') else total_loss,
         'pg_loss': avg_pg_loss,
-        'kl_penalty': kl_penalty
+        'kl_penalty': avg_kl_loss
     }
 
 def main():
