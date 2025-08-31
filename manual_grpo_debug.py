@@ -426,8 +426,8 @@ def manual_grpo_single_batch():
                 
                 # Length-normalized terms (CRITICAL FIX from review)
                 seq_logprob = tok_logp_pol.sum() / Tgen  # Normalized by length
-                # TRL-compatible f-divergence surrogate for KL calculation
-                seq_kl = (torch.exp(tok_logp_ref - tok_logp_pol) - (tok_logp_ref - tok_logp_pol) - 1).mean()
+                # Stable KL approximation (f-divergence can be unstable with large logp differences)
+                seq_kl = (tok_logp_pol - tok_logp_ref).mean()
                 
                 # GRPO loss: -A * logp + β * KL (BOTH with gradients)
                 # Note: Using sequence-level REINFORCE; TRL uses per-token likelihood ratio weighting
