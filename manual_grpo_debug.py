@@ -4,8 +4,9 @@ Manual GRPO implementation with extensive logging to debug the training process
 This script manually performs all GRPO steps for a single batch to understand
 where the pretrained model performance is being degraded.
 
-Fixed based on REWIEW.md:
-- Proper token-level KL divergence with gradients
+Fixed based on technical review:
+- Corrected tensor gather operations for proper log probability extraction
+- TRL-compatible f-divergence surrogate for KL calculation
 - Model state management (freeze reference, eval mode for generation)
 - Length normalization to prevent bias
 - Deterministic execution with proper seeding
@@ -240,8 +241,8 @@ def manual_grpo_single_batch():
                 
                 # Extract log probs for actual tokens
                 token_log_probs = completion_log_probs.gather(
-                    1, completion_tokens.unsqueeze(0)
-                ).squeeze()
+                    1, completion_tokens.unsqueeze(1)
+                ).squeeze(1)
                 
                 train_total_log_prob = token_log_probs.sum().item()
                 prompt_log_probs.append(train_total_log_prob)
@@ -255,8 +256,8 @@ def manual_grpo_single_batch():
                 ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
                 
                 ref_token_log_probs = ref_completion_log_probs.gather(
-                    1, completion_tokens.unsqueeze(0)
-                ).squeeze()
+                    1, completion_tokens.unsqueeze(1)
+                ).squeeze(1)
                 
                 ref_total_log_prob = ref_token_log_probs.sum().item()
                 prompt_ref_log_probs.append(ref_total_log_prob)
@@ -425,9 +426,11 @@ def manual_grpo_single_batch():
                 
                 # Length-normalized terms (CRITICAL FIX from review)
                 seq_logprob = tok_logp_pol.sum() / Tgen  # Normalized by length
-                seq_kl = (tok_logp_pol - tok_logp_ref).mean()  # Token-level KL (with gradients!)
+                # TRL-compatible f-divergence surrogate for KL calculation
+                seq_kl = (torch.exp(tok_logp_ref - tok_logp_pol) - (tok_logp_ref - tok_logp_pol) - 1).mean()
                 
                 # GRPO loss: -A * logp + β * KL (BOTH with gradients)
+                # Note: Using sequence-level REINFORCE; TRL uses per-token likelihood ratio weighting
                 pg_term = -advantage * seq_logprob
                 kl_term = beta * seq_kl
                 sample_loss = pg_term + kl_term
