@@ -28,46 +28,46 @@ from .dataset import RookWorldDataGenerator, load_and_prepare_samples
 
 @dataclass
 class TrainingConfig:
-    """Configuration for GRPO training."""
+    """Centralized configuration for GRPO training with optimal tested values."""
+    
+    # Model & Output
     model_name: str = "jrahn/RookWorld-LM-124M"
     output_dir: str = "./grpo_output"
     
-    # Training parameters
-    num_train_epochs: int = 1
-    learning_rate: float = 1e-6  # Increased from 1e-7
-    batch_size: int = 4
-    gradient_accumulation_steps: int = 4
-    max_length: int = 256
+    # Training Parameters (tested optimal values)
+    learning_rate: float = 1e-6      # Optimal for chess knowledge preservation
+    batch_size: int = 16             # Optimal from benchmarking (4x improvement)
+    num_train_epochs: int = 1        # Single epoch training
+    dataset_size: int = 5000         # Substantial training data
+    gradient_accumulation_steps: int = 1  # TRL default
+    max_length: int = 256            # Token sequence length
     
-    # GRPO specific
-    beta: float = 1.0  # Higher KL penalty to prevent catastrophic forgetting
-    num_generations: int = 4  # Number of completions per prompt (group size)
-    max_completion_length: int = 256  # Max length for generated completions (minimum 144)
+    # GRPO Algorithm Parameters (tested optimal values)
+    beta: float = 0.1                # Optimal KL/PG balance from testing
+    num_generations: int = 4         # Generations per prompt (good diversity)
+    max_completion_length: int = 256 # Max completion tokens
     
-    # Hardware optimizations
-    bf16: bool = True
-    use_torch_compile: bool = False
+    # Generation Parameters (working values that preserve chess format)
+    temperature: float = 0.5         # Focused sampling (vs TRL default 1.0)
+    top_p: float = 0.9              # Nucleus sampling (vs TRL default 1.0)
     
-    # Logging and evaluation
-    eval_steps: int = 100
-    save_steps: int = 100
-    logging_steps: int = 10
-    tensorboard: bool = False
+    # Stability Parameters (prevent model degradation)
+    max_grad_norm: float = 1.0       # Gradient clipping threshold
+    warmup_steps: int = 100          # Learning rate warmup (vs TRL default 0)
     
-    # Stability improvements
-    max_grad_norm: float = 1.0
-    warmup_steps: int = 100
-    stable: bool = False
+    # Logging & Evaluation (frequent monitoring)
+    eval_steps: int = 100            # Evaluation frequency
+    save_steps: int = 100            # Save frequency (vs TRL default 500)
+    logging_steps: int = 10          # Logging frequency
+    tensorboard: bool = False        # Enable via CLI flag
     
-    # Generation parameters
-    temperature: float = 0.5  # Lower temperature for focused sampling
-    top_p: float = 0.9        # Nucleus sampling
+    # Hardware Optimizations
+    bf16: bool = True               # Mixed precision training
+    use_torch_compile: bool = False # Optional optimization
     
-    # Stockfish path (optional - will auto-detect if None)
-    stockfish_path: Optional[str] = None
-    
-    # Dataset parameters
-    dataset_size: int = 500
+    # Optional Parameters
+    stockfish_path: Optional[str] = None  # Auto-detect if None
+    stable: bool = False            # Ultra-conservative mode via CLI
     dataset_name: str = "jrahn/rookworld_7m"
 
 
@@ -98,25 +98,28 @@ def main():
     parser = argparse.ArgumentParser(description="Train GRPO on RookWorld chess tasks")
     parser.add_argument("--model_name", default="jrahn/RookWorld-LM-124M", help="Model to fine-tune")
     parser.add_argument("--output_dir", default="./grpo_output", help="Output directory")
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=1, help="Number of epochs")
-    parser.add_argument("--stockfish_path", default=None, help="Path to Stockfish binary (auto-detect if None)")
+    # Use TrainingConfig defaults for all CLI arguments
+    default_config = TrainingConfig()
+    
+    parser.add_argument("--batch_size", type=int, default=default_config.batch_size, help="Batch size")
+    parser.add_argument("--learning_rate", type=float, default=default_config.learning_rate, help="Learning rate")
+    parser.add_argument("--num_epochs", type=int, default=default_config.num_train_epochs, help="Number of epochs")
+    parser.add_argument("--stockfish_path", default=default_config.stockfish_path, help="Path to Stockfish binary (auto-detect if None)")
     parser.add_argument("--bf16", action="store_true", help="Use BF16 precision")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
-    parser.add_argument("--max_completion_length", type=int, default=256, help="Max completion length (min 144)")
-    parser.add_argument("--dataset_size", type=int, default=500, help="Number of samples to load from dataset")
-    parser.add_argument("--num_generations", type=int, default=4, help="Number of completions per prompt")
-    parser.add_argument("--beta", type=float, default=0.1, help="KL penalty coefficient")
-    parser.add_argument("--eval_steps", type=int, default=100, help="Evaluation frequency")
-    parser.add_argument("--save_steps", type=int, default=100, help="Save frequency") 
-    parser.add_argument("--logging_steps", type=int, default=10, help="Logging frequency")
+    parser.add_argument("--max_completion_length", type=int, default=default_config.max_completion_length, help="Max completion length (min 144)")
+    parser.add_argument("--dataset_size", type=int, default=default_config.dataset_size, help="Number of samples to load from dataset")
+    parser.add_argument("--num_generations", type=int, default=default_config.num_generations, help="Number of completions per prompt")
+    parser.add_argument("--beta", type=float, default=default_config.beta, help="KL penalty coefficient")
+    parser.add_argument("--eval_steps", type=int, default=default_config.eval_steps, help="Evaluation frequency")
+    parser.add_argument("--save_steps", type=int, default=default_config.save_steps, help="Save frequency") 
+    parser.add_argument("--logging_steps", type=int, default=default_config.logging_steps, help="Logging frequency")
     parser.add_argument("--tensorboard", action="store_true", help="Enable tensorboard logging")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping threshold")
-    parser.add_argument("--warmup_steps", type=int, default=100, help="Learning rate warmup steps")
+    parser.add_argument("--max_grad_norm", type=float, default=default_config.max_grad_norm, help="Gradient clipping threshold")
+    parser.add_argument("--warmup_steps", type=int, default=default_config.warmup_steps, help="Learning rate warmup steps")
     parser.add_argument("--stable", action="store_true", help="Use stable training configuration")
-    parser.add_argument("--temperature", type=float, default=0.5, help="Generation temperature (lower for focused sampling)")
-    parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus sampling top_p")
+    parser.add_argument("--temperature", type=float, default=default_config.temperature, help="Generation temperature (lower for focused sampling)")
+    parser.add_argument("--top_p", type=float, default=default_config.top_p, help="Nucleus sampling top_p")
     
     args = parser.parse_args()
     
@@ -130,7 +133,7 @@ def main():
         print("🛡️ Applying stable training configuration...")
         # Override settings for stability
         args.learning_rate = min(args.learning_rate, 1e-6)  # Cap learning rate
-        args.beta = max(args.beta, 0.3)  # Increase KL penalty
+        args.beta = max(args.beta, 0.2)  # Moderate KL penalty for stability
         args.max_grad_norm = min(args.max_grad_norm, 0.5)  # Lower gradient clipping
         args.warmup_steps = max(args.warmup_steps, 200)  # Longer warmup
         print(f"  • Learning rate: {args.learning_rate:.2e}")

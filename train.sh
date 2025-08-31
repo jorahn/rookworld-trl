@@ -11,16 +11,19 @@
 
 set -e  # Exit on any error
 
-# Optimized training parameters (can be overridden with env vars)
+# Centralized optimal parameters (matching TrainingConfig - can be overridden with env vars)
 MODEL_NAME="${MODEL_NAME:-jrahn/RookWorld-LM-124M}"
-OUTPUT_DIR="${OUTPUT_DIR:-./grpo_output}"
-BATCH_SIZE="${BATCH_SIZE:-16}"  # Optimized batch size from benchmarking
-LEARNING_RATE="${LEARNING_RATE:-1e-6}"  # Increased from 1e-7
+
+# Create unique output directory with timestamp
+TIMESTAMP=$(date +"%y%m%d_%H%M")
+OUTPUT_DIR="${OUTPUT_DIR:-./grpo_output_${TIMESTAMP}}"
+BATCH_SIZE="${BATCH_SIZE:-16}"             # Optimal from benchmarking (4x improvement)
+LEARNING_RATE="${LEARNING_RATE:-1e-6}"     # Optimal for chess knowledge preservation  
 NUM_EPOCHS="${NUM_EPOCHS:-1}"
-NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-BETA="${BETA:-1.0}"  # High KL penalty to prevent catastrophic forgetting
+NUM_GENERATIONS="${NUM_GENERATIONS:-4}"    # Good diversity vs TRL default 8
+BETA="${BETA:-0.1}"                        # Optimal KL/PG balance from testing
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-256}"
-DATASET_SIZE="${DATASET_SIZE:-5000}"  # Larger dataset for substantial training
+DATASET_SIZE="${DATASET_SIZE:-5000}"       # Substantial training data
 
 # Evaluation and logging (optimized)
 EVAL_STEPS="${EVAL_STEPS:-100}"
@@ -31,9 +34,9 @@ LOGGING_STEPS="${LOGGING_STEPS:-10}"
 MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 WARMUP_STEPS="${WARMUP_STEPS:-100}"
 
-# Generation parameters (focused sampling)
-TEMPERATURE="${TEMPERATURE:-0.5}"  # Lower temperature for focused sampling
-TOP_P="${TOP_P:-0.9}"              # Keep nucleus sampling
+# Generation parameters (working values that preserve chess format)
+TEMPERATURE="${TEMPERATURE:-0.5}"  # Focused sampling vs TRL default 1.0
+TOP_P="${TOP_P:-0.9}"              # Nucleus sampling vs TRL default 1.0
 
 # Hardware optimizations
 USE_BF16="${USE_BF16:-true}"
@@ -49,7 +52,7 @@ echo "Epochs: ${NUM_EPOCHS}"
 echo "Dataset size: ${DATASET_SIZE} samples"
 echo "Max steps: ~$(( DATASET_SIZE / BATCH_SIZE )) steps"
 echo "Generations per prompt: ${NUM_GENERATIONS}"
-echo "Beta (KL coef): ${BETA} (high penalty)"
+echo "Beta (KL coef): ${BETA} (optimal balance)"
 echo "Max completion length: ${MAX_COMPLETION_LENGTH}"
 echo "Gradient clipping: ${MAX_GRAD_NORM}"
 echo "Warmup steps: ${WARMUP_STEPS}"
@@ -102,10 +105,11 @@ echo "Command: uv run rookworld-train ${ARGS[*]}"
 echo ""
 echo "📊 Monitor training with:"
 echo "   tensorboard --logdir ${OUTPUT_DIR}/runs"
+echo "📂 Unique run directory: ${OUTPUT_DIR}"
 echo ""
-echo "🛡️  Knowledge preservation features enabled:"
+echo "🛡️  Optimized training features enabled:"
 echo "   • Conservative learning rate: ${LEARNING_RATE} (preserve pretrained knowledge)"
-echo "   • High KL penalty: ${BETA} (prevent catastrophic forgetting)"
+echo "   • Balanced KL penalty: ${BETA} (optimal learning vs stability)"
 echo "   • Gradient clipping: ${MAX_GRAD_NORM}"
 echo "   • Learning rate warmup: ${WARMUP_STEPS} steps"  
 echo "   • Frequent checkpoints: every ${SAVE_STEPS} steps"

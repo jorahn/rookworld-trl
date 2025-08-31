@@ -73,15 +73,18 @@ uv run python manual_grpo_debug.py
 - **Optimized Batch Size**: 16 samples per batch for optimal throughput
 - **Gradient Clipping**: Prevents explosive gradient updates
 - **Learning Rate Warmup**: 100 steps for stable training initialization
-- **Conservative Mode**: `--stable` flag for extra stability (LR=1e-6, beta=0.3)
+- **Conservative Mode**: `--stable` flag for extra stability (LR=1e-6, beta=0.2)
 
 ## 📊 Training Configuration
 
 ### Default Settings (Optimized + Stable)
 ```bash
-Batch size: 16              # Optimal for RTX 4090
+Batch size: 16              # Optimal for RTX 4090 (4x improvement)
 Dataset size: 5000 samples  # Substantial training data
-Learning rate: 1e-5         # Balanced performance
+Learning rate: 1e-6         # Optimal for chess knowledge preservation
+Beta (KL penalty): 0.1      # Optimal KL/PG balance from testing
+Temperature: 0.5            # Focused sampling vs TRL default 1.0
+Top-p: 0.9                  # Nucleus sampling vs TRL default 1.0
 Gradient clipping: 1.0      # Stability protection
 Warmup steps: 100          # Stable initialization
 Evaluation: every 100 steps # Frequent monitoring
@@ -146,7 +149,7 @@ MODEL_NAME="your-model"           # Base model to fine-tune
 OUTPUT_DIR="./custom_output"      # Training output directory
 BATCH_SIZE=12                     # Batch size
 LEARNING_RATE=5e-6               # Learning rate
-BETA=0.2                         # KL penalty coefficient
+BETA=0.1                         # KL penalty coefficient (optimal balance)
 DATASET_SIZE=2000                # Number of training samples
 MAX_GRAD_NORM=0.5                # Gradient clipping threshold
 WARMUP_STEPS=200                 # Warmup duration

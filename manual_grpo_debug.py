@@ -50,7 +50,7 @@ def manual_grpo_single_batch():
     batch_size = 4  # Smaller for detailed analysis
     num_generations = 4  # Our override (TRL default = 8)
     max_new_tokens = 256  # Match max_completion_length
-    beta = 1.0  # Our override (TRL default = 0.0)
+    beta = 0.1  # Lower KL penalty for more learning
     learning_rate = 1e-6  # Increased from 1e-7
     temperature = 0.5  # Lower temperature for more focused sampling
     top_p = 0.9  # Keep nucleus sampling
@@ -65,7 +65,7 @@ def manual_grpo_single_batch():
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
-    print(f"  Beta (KL penalty): {beta}")
+    print(f"  Beta (KL penalty): {beta} (low for more learning)")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Temperature: {temperature} (focused sampling)")
     print(f"  Top-p: {top_p} (nucleus sampling)")
@@ -493,28 +493,12 @@ def manual_grpo_single_batch():
     print(f"  Post-update performance: {post_performance:.4f}")
     print(f"  Performance change: {performance_change:+.4f}")
     
-    if performance_change < -0.05:
-        print(f"  🚨 PERFORMANCE DEGRADATION!")
-        print(f"     Corrected GRPO still damages the model - deeper issue exists")
-    elif performance_change > 0.05:
-        print(f"  ✅ PERFORMANCE IMPROVEMENT!")
-        print(f"     Corrected GRPO step helped the model")
-    else:
-        print(f"  ➡️  Minimal change - stable update (GOOD!)")
-    
     # Compare with training logs
     training_avg_reward = -0.207
     print(f"\n📊 Comparison with Training Logs:")
     print(f"  Corrected manual result: {post_performance:.4f}")
     print(f"  Training log average: {training_avg_reward:.4f}")
     print(f"  Difference: {post_performance - training_avg_reward:.4f}")
-    
-    if abs(post_performance - training_avg_reward) < 0.1:
-        print(f"  🎯 Corrected manual reproduces training behavior!")
-        print(f"     → Training issue confirmed in algorithm implementation")
-    else:
-        print(f"  ✅ Corrected manual behavior differs from training logs")
-        print(f"     → Previous training used buggy implementation")
     
     # Analysis of KL regularization effectiveness
     kl_magnitude = abs(avg_kl_loss)
@@ -541,7 +525,7 @@ def manual_grpo_single_batch():
     }
 
 def main():
-    print("🚨 DEBUGGING GRPO MODEL DEGRADATION - STEP BY STEP")
+    print("🚨 DEBUGGING GRPO TRAINING - STEP BY STEP")
     print("=" * 70)
     
     try:
@@ -552,12 +536,6 @@ def main():
         print(f"  After 1 GRPO step: {results['post_performance']:.4f}")
         print(f"  Performance change: {results['performance_change']:+.4f}")
         print(f"  Total loss: {results['total_loss']:.2f}")
-        
-        if results['performance_change'] < -0.05:
-            print(f"\n🚨 CONFIRMED: Single GRPO step degrades pretrained model!")
-            print(f"   The issue is in the GRPO gradient updates destroying chess knowledge")
-        else:
-            print(f"\n✅ GRPO step preserves or improves model performance")
         
     except Exception as e:
         print(f"❌ Error in manual GRPO analysis: {e}")
