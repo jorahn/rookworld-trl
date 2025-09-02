@@ -345,8 +345,8 @@ def manual_grpo_single_batch():
     std_rewards = rewards_grouped.std(dim=1)
     print(f"  Group std devs: {std_rewards.numpy()}")
     
-    # Check for zero std (TRL adds 1e-4 for numerical stability)
-    std_rewards_safe = std_rewards + 1e-4
+    # Numerical safety: clamp std to avoid divide-by-zero or extreme scaling
+    std_rewards_safe = torch.clamp(std_rewards, min=1e-6)
     
     # Normalize advantages by std (TRL default behavior)
     std_expanded = std_rewards_safe.repeat_interleave(num_generations, dim=0)
