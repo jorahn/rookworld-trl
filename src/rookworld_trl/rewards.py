@@ -78,8 +78,8 @@ class ChessRewardScorer:
             return self.evaluation_cache[cache_key]
         
         try:
-            # Use chess.engine's built-in MultiPV support
-            limit = chess.engine.Limit(time=self.time_limit)
+            # Deterministic analysis: use fixed depth rather than time-based limit
+            limit = chess.engine.Limit(depth=self.depth)
             
             # Analyze with multiple principal variations
             infos = self.engine.analyse(board, limit, multipv=multipv)
@@ -149,14 +149,12 @@ class ChessRewardScorer:
         
         # Evaluate uncached positions with reduced time per position
         if uncached_indices:
-            time_per_pos = min(max_time_per_position, self.time_limit / max(1, len(uncached_indices)))
-            
             for idx in uncached_indices:
                 board = boards[idx]
                 
-                # Get top 5 moves analysis
+                # Get top 5 moves analysis (deterministic depth-based)
                 try:
-                    limit = chess.engine.Limit(time=time_per_pos)
+                    limit = chess.engine.Limit(depth=self.depth)
                     infos = self.engine.analyse(board, limit, multipv=5)
                     
                     best_moves = []
@@ -207,7 +205,7 @@ class ChessRewardScorer:
             return [None] * len(moves)
         
         evaluations = []
-        time_per_move = self.time_limit / max(1, len(moves))  # Distribute time across moves
+        # Deterministic depth for post-move evaluation
         
         for move in moves:
             if move not in board.legal_moves:
@@ -219,8 +217,8 @@ class ChessRewardScorer:
                 board_copy = board.copy()
                 board_copy.push(move)
                 
-                # Quick evaluation
-                limit = chess.engine.Limit(time=time_per_move)
+                # Fixed-depth evaluation for determinism
+                limit = chess.engine.Limit(depth=self.depth)
                 info = self.engine.analyse(board_copy, limit)
                 
                 if 'score' in info and info['score'] and info['score'].relative:

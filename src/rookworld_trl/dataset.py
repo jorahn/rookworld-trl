@@ -289,9 +289,10 @@ def get_batch_by_type(
 class RookWorldDataGenerator:
     """Generate chess training data from RookWorld dataset."""
     
-    def __init__(self, max_length: int = 256, dataset_size: int = 1000):
+    def __init__(self, max_length: int = 256, dataset_size: int = 1000, seed: int = 42):
         self.max_length = max_length
         self.dataset_size = dataset_size
+        self.seed = seed
         self.samples = self._load_rookworld_samples()
     
     def _load_rookworld_samples(self) -> List[Tuple[str, str, str, Dict]]:
@@ -302,7 +303,7 @@ class RookWorldDataGenerator:
                 n_samples=self.dataset_size,
                 dataset_name="jrahn/rookworld_7m",
                 split="train",
-                seed=42
+                seed=self.seed
             )
             print(f"✓ Loaded {len(samples)} mixed task samples")
             return samples
@@ -313,6 +314,8 @@ class RookWorldDataGenerator:
     
     def _create_fallback_samples(self) -> List[Tuple[str, str, str, Dict]]:
         """Create fallback synthetic samples if dataset loading fails."""
+        # Ensure deterministic fallback samples when a seed is provided
+        random.seed(self.seed)
         fallback_samples = []
         positions = [
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",

@@ -23,13 +23,9 @@ from src.rookworld_trl.dataset import RookWorldDataGenerator
 from src.rookworld_trl.utils import normalize_spacing
 import copy
 
-# Set deterministic behavior
+# Set deterministic behavior (seed set in main)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
 
 def generate_eval(model, **kwargs):
     """Generate in eval mode to eliminate dropout randomness, restore previous mode"""
@@ -41,7 +37,7 @@ def generate_eval(model, **kwargs):
         model.train()
     return outputs
 
-def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl: float = 0.5, checkpoint_every: int = 0):
+def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl: float = 0.5, checkpoint_every: int = 0, overfit_single_batch: bool = False, seed: int = 42):
     """
     Manually implement GRPO for a single batch with extensive logging
     """
@@ -75,6 +71,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"  Steps: {steps} (sequential GRPO updates)")
     if beta_adapt:
         print(f"  Beta adaptation: ON (target_KL≈{target_kl})")
+    if overfit_single_batch:
+        print(f"  Overfit mode: ON (reuse the same batch each step)")
+    print(f"  Seed: {seed}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Sampling (task-conditional): P(temp={p_temperature}, top_p={p_top_p}) | A(temp={a_temperature}, top_p={a_top_p})")
     print(f"  AdamW: β1={adam_beta1}, β2={adam_beta2}, ε={adam_epsilon}, decay={weight_decay}")
@@ -118,7 +117,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Load dataset samples once (already shuffled in generator)
     print(f"📊 Loading mixed batch...")
-    data_generator = RookWorldDataGenerator(dataset_size=20)
+    data_generator = RookWorldDataGenerator(dataset_size=20, seed=seed)
     ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
     total_prompts = len(ordered_prompts)
     
@@ -157,6 +156,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             is_a_task = prompt.startswith("A: ")
             gen_temperature = a_temperature if is_a_task else p_temperature
             gen_top_p = a_top_p if is_a_task else p_top_p
+
+            # Reseed RNG deterministically per generate call
+            torch.manual_seed(seed + 1000 + i)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed + 1000 + i)
 
             outputs = generate_eval(
                 model,
@@ -200,6 +204,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # Test initial performance
     initial_performance = test_model_performance(training_model, "INITIAL TRAINING MODEL")
     
+    # Collect per-step metrics for overview
+    step_metrics = []
+    
     # ============================================================================
     # PHASE 3: MANUAL GRPO TRAINING STEP
     # ============================================================================
@@ -233,6 +240,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
         gen_temperature = a_temperature if is_a_task else p_temperature
         gen_top_p = a_top_p if is_a_task else p_top_p
 
+        # Reseed RNG deterministically per generate block
+        torch.manual_seed(seed + 2000 + i)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed + 2000 + i)
+
         outputs = generate_eval(
             training_model,
             input_ids=inputs.input_ids,
@@ -245,7 +257,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             return_dict_in_generate=True,
-            output_scores=True
+            output_scores=True,
         )
         
         # Extract completions and calculate log probabilities
@@ -376,7 +388,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Convert back to list format for compatibility
     all_advantages = advantages_normalized.view(batch_size, num_generations).tolist()
-    
+
     print(f"\n📊 TRL Advantage Summary:")
     for i, advantages in enumerate(all_advantages):
         print(f"  Prompt {i+1}: {[f'{a:+.3f}' for a in advantages]}")
@@ -396,6 +408,12 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             print(f"    ⚠️  Mean far from zero - check advantage calculation!")
         if advantage_std < 0.01:
             print(f"    ⚠️  Very low std - insufficient reward diversity!")
+
+    # Aggregate advantage metric for table: mean per-prompt advantage range
+    adv_range_values = []
+    for advantages in all_advantages:
+        adv_range_values.append(max(advantages) - min(advantages))
+    step_adv_metric = float(np.mean(adv_range_values)) if adv_range_values else 0.0
     
     # ============================================================================
     # PHASE 6-8: CORRECTED GRPO LOSS CALCULATION WITH PROPER KL
@@ -562,6 +580,25 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     else:
         print(f"  ✅ KL and PG balanced - good regularization")
     
+    # Record metrics for step 1
+    # Safely convert tensors to scalars for metrics
+    _pg_val = avg_pg_loss.detach().item() if torch.is_tensor(avg_pg_loss) else float(avg_pg_loss)
+    _kl_val = avg_kl_loss.detach().item() if torch.is_tensor(avg_kl_loss) else float(avg_kl_loss)
+    _kl_ratio_val = float(kl_ratio.detach().item() if torch.is_tensor(kl_ratio) else kl_ratio)
+
+    step_metrics.append({
+        'step': 1,
+        'pre': float(initial_performance),
+        'post': float(post_performance),
+        'delta': float(performance_change),
+        'pg': _pg_val,
+        'kl': _kl_val,
+        'kl_ratio': _kl_ratio_val,
+        'adv': step_adv_metric,
+        'grad_norm': float(total_grad_norm) if 'total_grad_norm' in locals() else None,
+        'beta': float(beta),
+    })
+
     # Prepare for optional additional steps
     last_post_performance = post_performance
 
@@ -572,18 +609,21 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             print(f"🧭 SEQUENTIAL STEP {step_idx}/{steps}")
             print(f"{'='*70}")
 
-            # Select next batch slice from ordered dataset
-            start_idx = (step_idx - 1) * batch_size
-            end_idx = start_idx + batch_size
-            if end_idx <= total_prompts:
-                prompts = ordered_prompts[start_idx:end_idx]
-                wrap = False
+            # Select batch for this step
+            if overfit_single_batch:
+                print(f"🧾 Overfit mode: reusing initial batch (no dataset slice advance)")
             else:
-                wrap = True
-                overflow = end_idx % total_prompts
-                prompts = ordered_prompts[start_idx:] + ordered_prompts[:overflow]
-                prompts = prompts[:batch_size]
-            print(f"🧾 Using dataset prompts [{start_idx}:{end_idx}) of {total_prompts} (wrap-around: {'yes' if wrap else 'no'})")
+                start_idx = (step_idx - 1) * batch_size
+                end_idx = start_idx + batch_size
+                if end_idx <= total_prompts:
+                    prompts = ordered_prompts[start_idx:end_idx]
+                    wrap = False
+                else:
+                    wrap = True
+                    overflow = end_idx % total_prompts
+                    prompts = ordered_prompts[start_idx:] + ordered_prompts[:overflow]
+                    prompts = prompts[:batch_size]
+                print(f"🧾 Using dataset prompts [{start_idx}:{end_idx}) of {total_prompts} (wrap-around: {'yes' if wrap else 'no'})")
 
             # ===== Generation (same as PHASE 3) =====
             all_completions = []
@@ -597,6 +637,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 is_a_task = prompt.startswith("A: ")
                 gen_temperature = a_temperature if is_a_task else p_temperature
                 gen_top_p = a_top_p if is_a_task else p_top_p
+                # Reseed RNG deterministically per generate block in sequential steps
+                torch.manual_seed(seed + 3000 + (step_idx * 100) + i)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed + 3000 + (step_idx * 100) + i)
+
                 outputs = generate_eval(
                     training_model,
                     input_ids=inputs.input_ids,
@@ -609,7 +654,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                     pad_token_id=tokenizer.eos_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                     return_dict_in_generate=True,
-                    output_scores=True
+                    output_scores=True,
                 )
                 prompt_completions = []
                 prompt_log_probs = []
@@ -674,6 +719,12 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             std_expanded = std_rewards_safe.repeat_interleave(num_generations, dim=0)
             advantages_normalized = advantages_tensor / std_expanded
             all_advantages = advantages_normalized.view(batch_size, num_generations).tolist()
+
+            # Aggregate advantage metric for table: mean per-prompt advantage range
+            adv_range_values = []
+            for advantages in all_advantages:
+                adv_range_values.append(max(advantages) - min(advantages))
+            step_adv_metric = float(np.mean(adv_range_values)) if adv_range_values else 0.0
 
             # ===== Loss & update (same as PHASE 6-8) =====
             print(f"\n{'='*20} PHASE 6-8: CORRECTED GRPO LOSS CALCULATION (step {step_idx}) {'='*20}")
@@ -779,13 +830,34 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 with open(f"{ckpt_dir}/metadata.txt", "w") as f:
                     f.write(f"step={step_idx}\n beta={beta}\n target_kl={target_kl}\n")
 
+            # Store per-step metrics (overview)
+            pre_val = float(post_performance - perf_delta)
+            gradn = float(total_grad_norm) if 'total_grad_norm' in locals() else None
+            _pg_val = avg_pg_loss.detach().item() if torch.is_tensor(avg_pg_loss) else float(avg_pg_loss)
+            _kl_val = avg_kl_loss.detach().item() if torch.is_tensor(avg_kl_loss) else float(avg_kl_loss)
+            _kl_ratio_val = float(kl_ratio.detach().item() if torch.is_tensor(kl_ratio) else kl_ratio)
+
+            step_metrics.append({
+                'step': int(step_idx),
+                'pre': pre_val,
+                'post': float(post_performance),
+                'delta': float(perf_delta),
+                'pg': _pg_val,
+                'kl': _kl_val,
+                'kl_ratio': _kl_ratio_val,
+                'adv': step_adv_metric,
+                'grad_norm': gradn,
+                'beta': float(beta),
+            })
+
     return {
         'initial_performance': initial_performance,
         'post_performance': last_post_performance,
         'performance_change': last_post_performance - initial_performance,
         'total_loss': total_loss.item() if hasattr(total_loss, 'item') else total_loss,
         'pg_loss': avg_pg_loss,
-        'kl_penalty': avg_kl_loss
+        'kl_penalty': avg_kl_loss,
+        'step_metrics': step_metrics
     }
 
 def main():
@@ -797,14 +869,25 @@ def main():
     parser.add_argument("--beta_adapt", action="store_true")
     parser.add_argument("--target_kl", type=float, default=0.5)
     parser.add_argument("--checkpoint_every", type=int, default=0)
+    parser.add_argument("--overfit_single_batch", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     try:
+        # Global seeding for reproducibility
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
         results = manual_grpo_single_batch(
             steps=args.steps,
             beta_adapt=args.beta_adapt,
             target_kl=args.target_kl,
             checkpoint_every=args.checkpoint_every,
+            overfit_single_batch=args.overfit_single_batch,
+            seed=args.seed,
         )
         
         print(f"\n🎯 FINAL SUMMARY:")
@@ -812,6 +895,17 @@ def main():
         print(f"  After {args.steps} GRPO step(s): {results['post_performance']:.4f}")
         print(f"  Performance change: {results['performance_change']:+.4f}")
         print(f"  Total loss: {results['total_loss']:.2f}")
+        
+        # Overview table per step (when multiple steps requested)
+        if args.steps > 1 and 'step_metrics' in results:
+            rows = results['step_metrics']
+            print("\n📋 Per-step overview:")
+            header = f"{'Step':>4} | {'Pre':>6} | {'Post':>6} | {'Δ':>6} | {'PG':>7} | {'KL':>7} | {'KL%':>5} | {'Adv':>6} | {'GradN':>6} | {'β':>5}"
+            print(header)
+            print('-' * len(header))
+            for r in rows:
+                gradn = f"{r['grad_norm']:.2f}" if r['grad_norm'] is not None else "-"
+                print(f"{r['step']:>4} | {r['pre']:>6.3f} | {r['post']:>6.3f} | {r['delta']:>6.3f} | {r['pg']:>7.3f} | {r['kl']:>7.3f} | {r['kl_ratio']:>5.1f} | {r['adv']:>6.3f} | {gradn:>6} | {r['beta']:>5.3f}")
         
     except Exception as e:
         print(f"❌ Error in manual GRPO analysis: {e}")
