@@ -116,10 +116,24 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"🏆 Initializing reward function...")
     reward_fn = create_reward_function()
     
-    # Get mixed batch of prompts
+    # Load dataset samples once (already shuffled in generator)
     print(f"📊 Loading mixed batch...")
     data_generator = RookWorldDataGenerator(dataset_size=20)
-    prompts = data_generator.get_mixed_batch(batch_size)
+    ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
+    total_prompts = len(ordered_prompts)
+    
+    # Step 1 batch (fixed): first slice of ordered prompts
+    start_idx = 0
+    end_idx = start_idx + batch_size
+    if end_idx <= total_prompts:
+        prompts = ordered_prompts[start_idx:end_idx]
+        wrap = False
+    else:
+        wrap = True
+        overflow = end_idx % total_prompts
+        prompts = ordered_prompts[start_idx:] + ordered_prompts[:overflow]
+        prompts = prompts[:batch_size]
+    print(f"🧾 Using dataset prompts [{start_idx}:{end_idx}) of {total_prompts} (wrap-around: {'yes' if wrap else 'no'})")
     
     print(f"✅ Setup complete. Batch composition:")
     p_count = sum(1 for p in prompts if p.startswith("P: "))
@@ -557,6 +571,19 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             print(f"\n{'='*70}")
             print(f"🧭 SEQUENTIAL STEP {step_idx}/{steps}")
             print(f"{'='*70}")
+
+            # Select next batch slice from ordered dataset
+            start_idx = (step_idx - 1) * batch_size
+            end_idx = start_idx + batch_size
+            if end_idx <= total_prompts:
+                prompts = ordered_prompts[start_idx:end_idx]
+                wrap = False
+            else:
+                wrap = True
+                overflow = end_idx % total_prompts
+                prompts = ordered_prompts[start_idx:] + ordered_prompts[:overflow]
+                prompts = prompts[:batch_size]
+            print(f"🧾 Using dataset prompts [{start_idx}:{end_idx}) of {total_prompts} (wrap-around: {'yes' if wrap else 'no'})")
 
             # ===== Generation (same as PHASE 3) =====
             all_completions = []
