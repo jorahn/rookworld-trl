@@ -4,12 +4,17 @@ Manual GRPO implementation with extensive logging to debug the training process
 This script manually performs all GRPO steps for a single batch to understand
 where the pretrained model performance is being degraded.
 
-Fixed based on technical review:
-- Corrected tensor gather operations for proper log probability extraction
-- TRL-compatible f-divergence surrogate for KL calculation
-- Model state management (freeze reference, eval mode for generation)
-- Length normalization to prevent bias
-- Deterministic execution with proper seeding
+Overfit Defaults Patch (2025-09-02):
+- steps=50, overfit_single_batch=True
+- learning_rate=3e-6 (was 1e-6)
+- num_generations=8 (was 4), max_new_tokens=128 (was 256)
+- sampling: P(temp=0.7, top_p=0.95), A(temp=1.0, top_p=0.98)
+- prefer P-only prompts for overfit batch
+- beta schedule: warmup β=0.0 for 10 steps, then β=0.03 with adaptation toward target_KL≈0.15
+- advantage std clamp: min std=0.05 (was 1e-6)
+- entropy bonus: add −entropy_coef*H with entropy_coef=0.01
+
+To revert: reset constants to previous values and remove entropy term/P-only batching.
 """
 
 import torch
@@ -45,17 +50,22 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print("🔍 MANUAL GRPO DEBUG - SINGLE BATCH ANALYSIS")
     print("=" * 70)
     
-    # Configuration exactly matching TRL GRPO training
-    batch_size = 4  # Smaller for detailed analysis
-    num_generations = 4  # Our override (TRL default = 8)
-    max_new_tokens = 256  # Match max_completion_length
-    beta = 0.1  # Lower KL penalty for more learning
-    learning_rate = 1e-6  # Increased from 1e-7
+    # Configuration tuned for overfitting a single batch
+    batch_size = 4
+    num_generations = 8
+    max_new_tokens = 128
+    learning_rate = 3e-6
+    # Beta schedule
+    beta_warmup_steps = 20
+    beta_after_warmup = 0.02
+    beta = 0.0
     # Task-conditional sampling
-    p_temperature = 0.5
-    p_top_p = 0.9
-    a_temperature = 0.95
-    a_top_p = 0.95
+    p_temperature = 0.7
+    p_top_p = 0.95
+    a_temperature = 1.0
+    a_top_p = 0.98
+    # Entropy bonus
+    entropy_coef = 0.01
     
     # TRL optimizer defaults
     adam_beta1 = 0.9
@@ -63,11 +73,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     adam_epsilon = 1e-8
     weight_decay = 0.0
     
-    print(f"📋 Configuration (TRL-matched):")
+    print(f"📋 Configuration (overfit defaults):")
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
-    print(f"  Beta (KL penalty): {beta} (low for more learning)")
+    print(f"  Beta (KL penalty): {beta} (warmup → {beta_after_warmup} after {beta_warmup_steps} steps)")
     print(f"  Steps: {steps} (sequential GRPO updates)")
     if beta_adapt:
         print(f"  Beta adaptation: ON (target_KL≈{target_kl})")
@@ -118,7 +128,13 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # Load dataset samples once (already shuffled in generator)
     print(f"📊 Loading mixed batch...")
     data_generator = RookWorldDataGenerator(dataset_size=20, seed=seed)
-    ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
+    # Prefer P-only prompts for overfit batch, fallback to mixed
+    p_only = [prompt for t, prompt, _, _ in data_generator.samples if t == 'P']
+    if len(p_only) >= batch_size:
+        ordered_prompts = p_only
+        print(f"🧪 Overfit preset: using P-only prompts ({len(ordered_prompts)} available)")
+    else:
+        ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
     total_prompts = len(ordered_prompts)
     
     # Step 1 batch (fixed): first slice of ordered prompts
@@ -146,42 +162,29 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"\n{'='*20} PHASE 2: INITIAL MODEL PERFORMANCE {'='*20}")
     
     def test_model_performance(model, model_name):
-        """Test model performance and return average reward"""
+        """Test model performance and return average reward (deterministic, greedy)"""
         all_scores = []
         
         for i, prompt in enumerate(prompts):
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-            # Task-conditional generation parameters
-            is_a_task = prompt.startswith("A: ")
-            gen_temperature = a_temperature if is_a_task else p_temperature
-            gen_top_p = a_top_p if is_a_task else p_top_p
-
-            # Reseed RNG deterministically per generate call
-            torch.manual_seed(seed + 1000 + i)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed + 1000 + i)
-
+            # Deterministic greedy evaluation for stability
             outputs = generate_eval(
                 model,
                 input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,  # Avoid attention mask warning
+                attention_mask=inputs.attention_mask,
                 max_new_tokens=max_new_tokens,
-                num_return_sequences=2,  # Fewer for speed
-                do_sample=True,
-                temperature=gen_temperature,
-                top_p=gen_top_p,
+                num_return_sequences=1,
+                do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
             
             prompt_len = inputs.input_ids.shape[1]
             completions = []
-            
-            for j in range(2):
-                completion_tokens = outputs[j][prompt_len:]
-                completion = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-                completions.append(completion)
+            completion_tokens = outputs[0][prompt_len:]
+            completion = tokenizer.decode(completion_tokens, skip_special_tokens=True)
+            completions.append(completion)
             
             try:
                 scores = reward_fn(completions, prompts=[prompt] * len(completions))
@@ -190,7 +193,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 print(f"  Prompt {i+1}: avg reward = {avg_score:.3f}")
             except Exception as e:
                 print(f"  Prompt {i+1}: scoring error - {e}")
-                all_scores.extend([-1.0] * 2)
+                all_scores.extend([-1.0])
         
         overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
         positive_ratio = sum(1 for s in all_scores if s > 0) / len(all_scores) if all_scores else 0.0
@@ -378,7 +381,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"  Group std devs: {std_rewards.numpy()}")
     
     # Numerical safety: clamp std to avoid divide-by-zero or extreme scaling
-    std_rewards_safe = torch.clamp(std_rewards, min=1e-6)
+    std_rewards_safe = torch.clamp(std_rewards, min=0.05)
     
     # Normalize advantages by std (TRL default behavior)
     std_expanded = std_rewards_safe.repeat_interleave(num_generations, dim=0)
@@ -475,22 +478,23 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                     ref_logp = F.log_softmax(ref_logits, dim=-1)
                     tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()  # [Tgen]
                 
-                # Length-normalized terms (CRITICAL FIX from review)
-                seq_logprob = tok_logp_pol.sum() / Tgen  # Normalized by length
-                # Stable KL approximation (f-divergence can be unstable with large logp differences)
-                seq_kl = (tok_logp_pol - tok_logp_ref).mean()
-                
-                # GRPO loss: -A * logp + β * KL (BOTH with gradients)
-                # Note: Using sequence-level REINFORCE; TRL uses per-token likelihood ratio weighting
+                # Length-normalized terms
+                seq_logprob = tok_logp_pol.sum() / Tgen
+                seq_kl = (tok_logp_pol - tok_logp_ref).pow(2).mean()
+                # Entropy of policy over completion tokens
+                probs = torch.exp(pol_logp)
+                tok_entropy = -(probs * pol_logp).sum(dim=-1).mean()
+                # Loss: -A * logp + β * KL - c * H
                 pg_term = -advantage * seq_logprob
                 kl_term = beta * seq_kl
-                sample_loss = pg_term + kl_term
+                ent_term = -entropy_coef * tok_entropy
+                sample_loss = pg_term + kl_term + ent_term
                 
                 prompt_pg_loss += pg_term
                 prompt_kl_loss += kl_term
                 
-                print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}")
-                print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, total={sample_loss:.3f}")
+                print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}, H={tok_entropy:.3f}")
+                print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, EntReg={ent_term:.3f}, total={sample_loss:.3f}")
             else:
                 print(f"  Gen {j+1}: Empty completion - skipping")
         
@@ -761,14 +765,17 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                             ref_logp = F.log_softmax(ref_logits, dim=-1)
                             tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()
                         seq_logprob = tok_logp_pol.sum() / Tgen
-                        seq_kl = (tok_logp_pol - tok_logp_ref).mean()
+                        seq_kl = (tok_logp_pol - tok_logp_ref).pow(2).mean()
+                        probs = torch.exp(pol_logp)
+                        tok_entropy = -(probs * pol_logp).sum(dim=-1).mean()
                         pg_term = -advantage * seq_logprob
                         kl_term = beta * seq_kl
-                        sample_loss = pg_term + kl_term
+                        ent_term = -entropy_coef * tok_entropy
+                        sample_loss = pg_term + kl_term + ent_term
                         prompt_pg_loss += pg_term
                         prompt_kl_loss += kl_term
-                        print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}")
-                        print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, total={sample_loss:.3f}")
+                        print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}, H={tok_entropy:.3f}")
+                        print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, EntReg={ent_term:.3f}, total={sample_loss:.3f}")
                     else:
                         print(f"  Gen {j+1}: Empty completion - skipping")
                 avg_prompt_pg = prompt_pg_loss / num_generations
@@ -802,14 +809,20 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             else:
                 print(f"  ⚠️  No gradients to update")
 
-            # Optional beta adaptation
-            if beta_adapt:
-                kl_mag = float(abs(avg_kl_loss))
-                if kl_mag > target_kl * 1.05:
-                    beta = min(1.0, beta * 1.1)
-                elif kl_mag < target_kl * 0.95:
-                    beta = max(0.01, beta * 0.9)
-                print(f"  🔧 Beta adaptation: KL≈{kl_mag:.3f}, target≈{target_kl:.3f} → beta={beta:.3f}")
+            # Beta warmup + optional adaptation
+            if step_idx <= beta_warmup_steps:
+                beta = 0.0
+                print(f"  🔧 Beta warmup: step {step_idx}/{beta_warmup_steps} → beta={beta:.3f}")
+            else:
+                if beta < beta_after_warmup:
+                    beta = beta_after_warmup
+                if beta_adapt:
+                    kl_mag = float(abs(avg_kl_loss))
+                    if kl_mag > target_kl * 1.05:
+                        beta = min(1.0, beta * 1.1)
+                    elif kl_mag < target_kl * 0.95:
+                        beta = max(0.005, beta * 0.9)
+                    print(f"  🔧 Beta adaptation: KL≈{kl_mag:.3f}, target≈{target_kl:.3f} → beta={beta:.3f}")
 
             # Post-update eval
             print(f"\n{'='*20} PHASE 9: POST-UPDATE PERFORMANCE (step {step_idx}) {'='*20}")
@@ -865,11 +878,11 @@ def main():
     print("=" * 70)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=1)
-    parser.add_argument("--beta_adapt", action="store_true")
-    parser.add_argument("--target_kl", type=float, default=0.5)
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--beta_adapt", action="store_true", default=True)
+    parser.add_argument("--target_kl", type=float, default=0.15)
     parser.add_argument("--checkpoint_every", type=int, default=0)
-    parser.add_argument("--overfit_single_batch", action="store_true")
+    parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
