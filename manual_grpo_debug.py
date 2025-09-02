@@ -52,9 +52,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Configuration tuned for overfitting a single batch
     batch_size = 4
-    num_generations = 8
+    num_generations = 12
     max_new_tokens = 128
-    learning_rate = 3e-6
+    learning_rate = 2e-6
     # Beta schedule
     beta_warmup_steps = 20
     beta_after_warmup = 0.005
@@ -65,7 +65,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     a_temperature = 1.0
     a_top_p = 0.98
     # Entropy bonus
-    entropy_coef = 0.01
+    entropy_coef = 0.005
     
     # TRL optimizer defaults
     adam_beta1 = 0.9
@@ -73,7 +73,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     adam_epsilon = 1e-8
     weight_decay = 0.0
     
-    print(f"📋 Configuration (overfit defaults, 2025-09-02r3):")
+    print(f"📋 Configuration (overfit defaults, 2025-09-02r4):")
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
