@@ -819,9 +819,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 if beta_adapt:
                     kl_mag = float(abs(avg_kl_loss))
                     if kl_mag > target_kl * 1.05:
-                        beta = min(1.0, beta * 1.1)
+                        beta = beta * 1.1
                     elif kl_mag < target_kl * 0.95:
-                        beta = max(0.005, beta * 0.9)
+                        beta = max(0.0, beta * 0.9)
+                    # Clamp beta to a safe range when adapting
+                    beta = max(0.0, min(beta, 0.05))
                     print(f"  🔧 Beta adaptation: KL≈{kl_mag:.3f}, target≈{target_kl:.3f} → beta={beta:.3f}")
 
             # Post-update eval
@@ -879,8 +881,8 @@ def main():
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50)
-    parser.add_argument("--beta_adapt", action="store_true", default=True)
-    parser.add_argument("--target_kl", type=float, default=0.15)
+    parser.add_argument("--beta_adapt", action="store_true", default=False)
+    parser.add_argument("--target_kl", type=float, default=1.0)
     parser.add_argument("--checkpoint_every", type=int, default=0)
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
