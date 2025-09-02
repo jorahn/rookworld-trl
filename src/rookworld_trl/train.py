@@ -120,6 +120,12 @@ def main():
     parser.add_argument("--stable", action="store_true", help="Use stable training configuration")
     parser.add_argument("--temperature", type=float, default=default_config.temperature, help="Generation temperature (lower for focused sampling)")
     parser.add_argument("--top_p", type=float, default=default_config.top_p, help="Nucleus sampling top_p")
+    # Task-conditional generation controls
+    parser.add_argument("--task_conditional_gen", action="store_true", help="Alternate training on P and A task datasets with different generation parameters")
+    parser.add_argument("--p_temperature", type=float, default=0.5, help="Temperature for P: tasks when task-conditional generation is enabled")
+    parser.add_argument("--p_top_p", type=float, default=0.9, help="Top-p for P: tasks when task-conditional generation is enabled")
+    parser.add_argument("--a_temperature", type=float, default=0.95, help="Temperature for A: tasks when task-conditional generation is enabled")
+    parser.add_argument("--a_top_p", type=float, default=0.95, help="Top-p for A: tasks when task-conditional generation is enabled")
     
     args = parser.parse_args()
     
@@ -219,43 +225,120 @@ def main():
     print(f"✓ Created training dataset with {len(train_dataset)} unique samples (requested {config.dataset_size})")
     
     # Training configuration - minimal working configuration
-    training_args = GRPOConfig(
-        output_dir=config.output_dir,
-        num_train_epochs=config.num_train_epochs,
-        learning_rate=config.learning_rate,
-        beta=config.beta,
-        num_generations=config.num_generations,
-        max_completion_length=config.max_completion_length,
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        bf16=config.bf16,
-        report_to=["tensorboard"] if config.tensorboard else [],
-        logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
-        max_steps=max(1, len(train_dataset) // config.batch_size) if len(train_dataset) < 1000 else -1,
-        max_grad_norm=config.max_grad_norm,
-        warmup_steps=config.warmup_steps,
-        temperature=config.temperature,
-        top_p=config.top_p
-    )
-    
-    # Initialize trainer
-    print("\n🚀 Initializing GRPO trainer...")
-    trainer = GRPOTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        processing_class=tokenizer,
-        reward_funcs=[reward_function],
-    )
-    
-    print("\n🎯 Starting GRPO training...")
-    print(f"   Epochs: {config.num_train_epochs}")
-    print(f"   Learning rate: {config.learning_rate}")
-    print(f"   Beta (KL coef): {config.beta}")
-    print(f"   Generations per prompt: {config.num_generations}")
-    
-    # Train the model
-    trainer.train()
+    if args.task_conditional_gen:
+        print("\n🧩 Task-conditional generation enabled: alternating P and A phases")
+
+        # Helper to build a Dataset from prompts list
+        def dataset_from_prompts(prompts: list[str]) -> Dataset:
+            return Dataset.from_dict({"prompt": prompts})
+
+        # Build P and A prompt lists
+        p_prompts = data_generator.get_task_specific_batch("P", min(config.dataset_size, data_generator.get_samples_info()["P"]))
+        a_prompts = data_generator.get_task_specific_batch("A", min(config.dataset_size, data_generator.get_samples_info()["A"]))
+
+        # Train on P tasks
+        if p_prompts:
+            p_ds = dataset_from_prompts(p_prompts)
+            print(f"✓ P: dataset with {len(p_ds)} prompts")
+            p_args = GRPOConfig(
+                output_dir=config.output_dir,
+                num_train_epochs=config.num_train_epochs,
+                learning_rate=config.learning_rate,
+                beta=config.beta,
+                num_generations=config.num_generations,
+                max_completion_length=config.max_completion_length,
+                logging_steps=config.logging_steps,
+                save_steps=config.save_steps,
+                bf16=config.bf16,
+                report_to=["tensorboard"] if config.tensorboard else [],
+                logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
+                max_steps=max(1, len(p_ds) // config.batch_size) if len(p_ds) < 1000 else -1,
+                max_grad_norm=config.max_grad_norm,
+                warmup_steps=config.warmup_steps,
+                temperature=args.p_temperature,
+                top_p=args.p_top_p,
+            )
+            print("\n🚀 Initializing GRPO trainer for P tasks (focused)")
+            p_trainer = GRPOTrainer(
+                model=model,
+                args=p_args,
+                train_dataset=p_ds,
+                processing_class=tokenizer,
+                reward_funcs=[reward_function],
+            )
+            print("\n🎯 Training on P tasks...")
+            p_trainer.train()
+
+        # Train on A tasks
+        if a_prompts:
+            a_ds = dataset_from_prompts(a_prompts)
+            print(f"✓ A: dataset with {len(a_ds)} prompts")
+            a_args = GRPOConfig(
+                output_dir=config.output_dir,
+                num_train_epochs=config.num_train_epochs,
+                learning_rate=config.learning_rate,
+                beta=config.beta,
+                num_generations=config.num_generations,
+                max_completion_length=config.max_completion_length,
+                logging_steps=config.logging_steps,
+                save_steps=config.save_steps,
+                bf16=config.bf16,
+                report_to=["tensorboard"] if config.tensorboard else [],
+                logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
+                max_steps=max(1, len(a_ds) // config.batch_size) if len(a_ds) < 1000 else -1,
+                max_grad_norm=config.max_grad_norm,
+                warmup_steps=config.warmup_steps,
+                temperature=args.a_temperature,
+                top_p=args.a_top_p,
+            )
+            print("\n🚀 Initializing GRPO trainer for A tasks (permissive)")
+            a_trainer = GRPOTrainer(
+                model=model,
+                args=a_args,
+                train_dataset=a_ds,
+                processing_class=tokenizer,
+                reward_funcs=[reward_function],
+            )
+            print("\n🎯 Training on A tasks...")
+            a_trainer.train()
+    else:
+        training_args = GRPOConfig(
+            output_dir=config.output_dir,
+            num_train_epochs=config.num_train_epochs,
+            learning_rate=config.learning_rate,
+            beta=config.beta,
+            num_generations=config.num_generations,
+            max_completion_length=config.max_completion_length,
+            logging_steps=config.logging_steps,
+            save_steps=config.save_steps,
+            bf16=config.bf16,
+            report_to=["tensorboard"] if config.tensorboard else [],
+            logging_dir=f"{config.output_dir}/runs" if config.tensorboard else None,
+            max_steps=max(1, len(train_dataset) // config.batch_size) if len(train_dataset) < 1000 else -1,
+            max_grad_norm=config.max_grad_norm,
+            warmup_steps=config.warmup_steps,
+            temperature=config.temperature,
+            top_p=config.top_p
+        )
+        
+        # Initialize trainer
+        print("\n🚀 Initializing GRPO trainer...")
+        trainer = GRPOTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            processing_class=tokenizer,
+            reward_funcs=[reward_function],
+        )
+        
+        print("\n🎯 Starting GRPO training...")
+        print(f"   Epochs: {config.num_train_epochs}")
+        print(f"   Learning rate: {config.learning_rate}")
+        print(f"   Beta (KL coef): {config.beta}")
+        print(f"   Generations per prompt: {config.num_generations}")
+        
+        # Train the model
+        trainer.train()
     
     # Save the final model
     print(f"\n💾 Saving model to {config.output_dir}...")

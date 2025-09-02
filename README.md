@@ -37,6 +37,11 @@ tensorboard --logdir grpo_output_*/runs
 # Conservative training for stability testing
 uv run rookworld-train --stable
 
+# Task-conditional generation (P vs A) during training
+uv run rookworld-train --task_conditional_gen \
+  --p_temperature 0.5 --p_top_p 0.9 \
+  --a_temperature 0.95 --a_top_p 0.95
+
 # Custom parameter exploration
 uv run rookworld-train --batch_size 8 --learning_rate 5e-6 --beta 0.2
 ```
@@ -62,7 +67,7 @@ uv run python manual_grpo_debug.py
 ### Enhanced Reward System
 - **Best Move Verification**: Stockfish ground truth comparison (50% weight)
 - **Move Candidates Quality**: Set overlap with top 5 Stockfish moves (30% weight)  
-- **Evaluation Accuracy**: MAE regression against true centipawn values (20% weight)
+- **Evaluation Accuracy**: MAE regression against true pawn values (20% weight)
 
 ### RookWorld Dataset Integration
 - **Mixed Task Support**: Both P: (policy analysis) and A: (environment prediction)
@@ -90,6 +95,13 @@ Warmup steps: 100          # Helps training stability
 Evaluation: every 100 steps # For monitoring experiments
 Tensorboard: enabled       # Research tracking
 ```
+
+### Generation Parameters & Units
+- Evaluations (`E:`) use pawn units throughout (e.g., `0.30` = +0.30 pawns). Ground-truth engine scores are converted from centipawns to pawns before MAE.
+- Tooling (example, inspect, manual debug) applies task-conditional generation for better behavior:
+  - P: tasks → `temperature=0.5`, `top_p=0.9` (focused)
+  - A: tasks → `temperature=0.95`, `top_p=0.95` (slightly more permissive)
+- Attention masks are passed explicitly during generation to avoid tokenizer warnings and ensure stable behavior.
 
 ### Stability Features
 - **Gradient Explosion Protection**: `max_grad_norm=1.0`
@@ -189,7 +201,7 @@ uv run python manual_grpo_debug.py
 ```python
 # Policy Task Example
 prompt = "P: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-response = "M: e2e4 d2d4 g1f3 E: 30 35 28 B: e2e4"
+response = "M: e2e4 d2d4 g1f3 E: 0.30 0.35 0.28 B: e2e4"
 
 # Component scoring:
 # Best move (50%): 1.0 (e2e4 matches Stockfish #1)

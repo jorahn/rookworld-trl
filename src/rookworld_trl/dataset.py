@@ -324,7 +324,8 @@ class RookWorldDataGenerator:
             fen = random.choice(positions)
             if i % 2 == 0:  # P: task
                 prompt = f"P: {fen}"
-                completion = " M: e2e4 d2d4 g1f3 E: 0.3 0.35 0.28 B: e2e4"
+                # Use pawn units (e.g., 0.30 = +0.30 pawns) for E: values to match dataset notation
+                completion = " M: e2e4 d2d4 g1f3 E: 0.30 0.35 0.28 B: e2e4"
                 fallback_samples.append(("P", prompt, completion, {"fen": fen}))
             else:  # A: task
                 prompt = f"A: {fen}+e2e4+,"

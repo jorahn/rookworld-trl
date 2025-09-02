@@ -452,27 +452,31 @@ class ChessRewardScorer:
             except:
                 return -0.5  # Invalid move format
         
-        # Get ground truth evaluations using batch method
-        true_evals = self.batch_evaluate_moves_after_playing(board, parsed_moves)
+        # Get ground truth evaluations using batch method (returns centipawns)
+        true_evals_cp = self.batch_evaluate_moves_after_playing(board, parsed_moves)
         
-        # Filter out None values and replace with fallback
-        true_evals = [eval_cp if eval_cp is not None else 0 for eval_cp in true_evals]
+        # Filter out None values and replace with fallback, then convert to pawns
+        true_evals_pawn = [
+            (eval_cp / 100.0) if (eval_cp is not None) else 0.0
+            for eval_cp in true_evals_cp
+        ]
         
-        if not true_evals:
+        if not true_evals_pawn:
             return 0.0  # No evaluations possible
         
-        # Calculate MAE and convert to reward
-        mae = np.mean([abs(pred - true) for pred, true in zip(predicted_evals, true_evals)])
+        # Calculate MAE in pawn units and convert to reward
+        mae = np.mean([abs(pred - true) for pred, true in zip(predicted_evals, true_evals_pawn)])
         
-        # Check for sign errors (position misunderstanding)
+        # Check for sign errors (position misunderstanding) in pawn units
         sign_errors = 0
-        for pred, true in zip(predicted_evals, true_evals):
-            if abs(true) > 200 and np.sign(pred) != np.sign(true):  # 200 centipawn threshold
+        for pred, true in zip(predicted_evals, true_evals_pawn):
+            # Penalize sign mismatch when true advantage is meaningful (> 0.2 pawns)
+            if abs(true) > 0.2 and np.sign(pred) != np.sign(true):
                 sign_errors += 1
         
-        # Convert MAE to reward (lower MAE = higher reward)
-        # MAE of 0 = reward 1.0, MAE of 500+ = reward 0.0
-        mae_reward = max(0.0, 1.0 - mae / 500.0)
+        # Convert MAE to reward (lower MAE = higher reward) in pawns
+        # MAE of 0.0 pawns => 1.0, MAE of 1.0 pawn => 0.0
+        mae_reward = max(0.0, 1.0 - mae / 1.0)
         
         # Strong penalty for sign errors
         sign_penalty = sign_errors * 0.4
