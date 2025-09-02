@@ -48,7 +48,6 @@
 ## Full Execution Log
 
 ```
-`torch_dtype` is deprecated! Use `dtype` instead!
 🚨 DEBUGGING GRPO TRAINING - STEP BY STEP
 ======================================================================
 🔍 MANUAL GRPO DEBUG - SINGLE BATCH ANALYSIS
@@ -142,9 +141,40 @@ Loading 20 samples from RookWorld dataset...
            Text:                                      M: a7a5 e2d3 e2g4 g1g4 ...
            Normalized: M: a7a5 e2d3 e2g4 g1g4 e2d2 E: 3.58 4.01 3.78 4.38 4.16 B: a...
     Gen 4: Train_LP= -596.0, Ref_LP=  -36.2
-           Text:                                      M: e2d3 e2g4 g1g7
-[... omitted for brevity: identical to full log in manual_grpo_debug_2025-09-02.log ...]
+           Text:                                      M: e2d3 e2g4 g1g7 e2g2 ...
+           Normalized: M: e2d3 e2g4 g1g7 e2g2 g1g4 E: 3.78 4.08 4.09 3.8 4.6 B: e2d...
 
+==================== PHASE 4: REWARD CALCULATION ====================
+
+🎯 Scoring Prompt 1 completions:
+  Gen 1: Reward= 0.509 | M: d7d5 d7d6 g7g6 e7e5 e7e6 E: -0.4 -0.6...
+  Gen 2: Reward= 0.458 | M: d7d6 d7d5 e7e6 g7g6 e7e5 E: -0.72 -0....
+  Gen 3: Reward= 0.491 | M: d7d5 e7e5 g7g6 d7d6 e7e6 E: -0.59 -0....
+  Gen 4: Reward= 0.706 | M: d7d5 g7g6 e7e5 d7d6 e7e6 E: -0.43 -0....
+  📊 Average reward: 0.541
+
+🎯 Scoring Prompt 2 completions:
+  Gen 1: Reward= 0.145 | M: d4d3 a6c5 e7e8 c8b8 h8e8 E: -3.76 -3....
+  Gen 2: Reward= 0.083 | M: a6c5 h8h3 e7e8 h8h4 d4d3 E: -3.49 -3....
+  Gen 3: Reward= 0.179 | M: h8e8 d4d3 a6c5 c8b8 h8h6 E: -3.46 -3....
+  Gen 4: Reward= 0.125 | M: a6c5 c6f3 d4d3 c6d7 e7d7 E: -3.44 -3....
+  📊 Average reward: 0.133
+
+🎯 Scoring Prompt 3 completions:
+  Gen 1: Reward= 0.910 | r1b2b2/1p3Q2/3k1P1p/p1nN2p1/2P5/5N2/PP3P...
+  Gen 2: Reward= 0.910 | r1b2b2/1p3Q2/3k1P1p/p1nN2p1/2P5/5N2/PP3P...
+  Gen 3: Reward= 0.910 | r1b2b2/1p3Q2/3k1P1p/p1nN2p1/2P5/5N2/PP3P...
+  Gen 4: Reward= 0.910 | r1b2b2/1p3Q2/3k1P1p/p1nN2p1/2P5/5N2/PP3P...
+  📊 Average reward: 0.910
+
+🎯 Scoring Prompt 4 completions:
+  Gen 1: Reward= 0.045 | M: e2d3 e2g4 g1g7 g1g4 e2g2 E: 3.75 4.44...
+  Gen 2: Reward=-0.005 | M: e2g4 a7a5 e2g2 g1g4 d8f8 E: 3.91 4.39...
+  Gen 3: Reward= 0.195 | M: a7a5 e2d3 e2g4 g1g4 e2d2 E: 3.58 4.01...
+  Gen 4: Reward= 0.045 | M: e2d3 e2g4 g1g7 e2g2 g1g4 E: 3.78 4.08...
+  📊 Average reward: 0.070
+
+==================== PHASE 5: TRL EXACT ADVANTAGE CALCULATION ====================
 🔢 TRL Advantage Calculation (exact formula):
   Total rewards shape: torch.Size([16])
   Rewards: [ 0.5092      0.458       0.4912      0.706       0.145       0.08333333
@@ -163,5 +193,108 @@ Loading 20 samples from RookWorld dataset...
   1.14568005 -0.20041922  0.          0.          0.          0.
  -0.28867513 -0.8660254   1.44337567 -0.28867513]
 
-... (continues through loss breakdown, gradient norms, and post-update performance)
+📊 TRL Advantage Summary:
+  Prompt 1: ['-0.285', '-0.742', '-0.446', '+1.473']
+    Stats: mean=+0.000 (expect ≈0), std=0.866 (expect >0)
+    ✅ Good range (2.215) - clear learning signal
+  Prompt 2: ['+0.302', '-1.247', '+1.146', '-0.200']
+    Stats: mean=+0.000 (expect ≈0), std=0.866 (expect >0)
+    ✅ Good range (2.393) - clear learning signal
+  Prompt 3: ['+0.000', '+0.000', '+0.000', '+0.000']
+    Stats: mean=+0.000 (expect ≈0), std=0.000 (expect >0)
+    ⚠️  Very small range (0.0000) - little learning signal!
+    ⚠️  Very low std - insufficient reward diversity!
+  Prompt 4: ['-0.289', '-0.866', '+1.443', '-0.289']
+    Stats: mean=-0.000 (expect ≈0), std=0.866 (expect >0)
+    ✅ Good range (2.309) - clear learning signal
+
+==================== PHASE 6-8: CORRECTED GRPO LOSS CALCULATION ====================
+🔄 Computing GRPO loss with proper token-level KL...
+
+🎯 Prompt 1 - Corrected GRPO Loss:
+  Gen 1: A=-0.285, logp/len=-7.406, kl=-5.625
+         PG=-2.109, KL_penalty=-0.562, total=-2.672
+  Gen 2: A=-0.742, logp/len=-8.312, kl=-6.844
+         PG=-6.156, KL_penalty=-0.684, total=-6.844
+  Gen 3: A=-0.446, logp/len=-8.188, kl=-6.500
+         PG=-3.656, KL_penalty=-0.648, total=-4.312
+  Gen 4: A=+1.473, logp/len=-8.000, kl=-6.281
+         PG=11.812, KL_penalty=-0.629, total=11.188
+  📊 Prompt averages: PG=-0.016, KL=-0.633
+
+🎯 Prompt 2 - Corrected GRPO Loss:
+  Gen 1: A=+0.302, logp/len=-7.188, kl=-5.469
+         PG=2.172, KL_penalty=-0.547, total=1.625
+  Gen 2: A=-1.247, logp/len=-7.531, kl=-5.750
+         PG=-9.375, KL_penalty=-0.574, total=-9.938
+  Gen 3: A=+1.146, logp/len=-7.094, kl=-5.344
+         PG=8.125, KL_penalty=-0.535, total=7.594
+  Gen 4: A=-0.200, logp/len=-6.875, kl=-4.938
+         PG=-1.375, KL_penalty=-0.494, total=-1.867
+  📊 Prompt averages: PG=-0.109, KL=-0.539
+
+🎯 Prompt 3 - Corrected GRPO Loss:
+  Gen 1: A=+0.000, logp/len=-5.906, kl=-5.250
+         PG=0.000, KL_penalty=-0.523, total=-0.523
+  Gen 2: A=+0.000, logp/len=-6.281, kl=-5.656
+         PG=0.000, KL_penalty=-0.566, total=-0.566
+  Gen 3: A=+0.000, logp/len=-5.812, kl=-5.188
+         PG=0.000, KL_penalty=-0.520, total=-0.520
+  Gen 4: A=+0.000, logp/len=-5.406, kl=-4.750
+         PG=0.000, KL_penalty=-0.475, total=-0.475
+  📊 Prompt averages: PG=0.000, KL=-0.520
+
+🎯 Prompt 4 - Corrected GRPO Loss:
+  Gen 1: A=-0.289, logp/len=-8.438, kl=-6.250
+         PG=-2.438, KL_penalty=-0.625, total=-3.062
+  Gen 2: A=-0.866, logp/len=-6.219, kl=-4.125
+         PG=-5.375, KL_penalty=-0.412, total=-5.781
+  Gen 3: A=+1.443, logp/len=-7.156, kl=-5.031
+         PG=10.312, KL_penalty=-0.504, total=9.812
+  Gen 4: A=-0.289, logp/len=-6.969, kl=-4.906
+         PG=-2.016, KL_penalty=-0.490, total=-2.500
+  📊 Prompt averages: PG=0.121, KL=-0.508
+
+🔢 CORRECTED Loss Breakdown:
+  Policy Gradient Loss:   -0.001
+  KL Loss (with gradients):   -0.547
+  Total Loss:          =  -0.547
+
+  KL penalty ratio: 100.0%
+
+🔄 Performing corrected gradient update...
+  Total gradient norm: 21.61
+  ✅ Gradient update applied with proper KL regularization
+
+==================== PHASE 9: POST-UPDATE PERFORMANCE ====================
+  Prompt 1: avg reward = 0.414
+  Prompt 2: avg reward = 0.152
+  Prompt 3: avg reward = 0.910
+  Prompt 4: avg reward = 0.112
+📊 POST-UPDATE TRAINING MODEL Performance:
+  Average reward: 0.3970
+  Positive ratio: 100.0%
+
+==================== PHASE 10: ANALYSIS ====================
+🔍 Corrected GRPO Step Impact:
+  Initial performance: 0.4570
+  Post-update performance: 0.3970
+  Performance change: -0.0600
+
+📊 Comparison with Training Logs:
+  Corrected manual result: 0.3970
+  Training log average: -0.2070
+  Difference: 0.6040
+
+🔍 KL Regularization Analysis:
+  KL magnitude: 0.547
+  PG magnitude: 0.001
+  ⚠️  KL dominates - consider lowering beta
+
+🎯 FINAL SUMMARY:
+  Initial model performance: 0.4570
+  After 1 GRPO step: 0.3970
+  Performance change: -0.0600
+  Total loss: -0.55
+
 ```

@@ -54,8 +54,11 @@ def manual_grpo_single_batch():
     max_new_tokens = 256  # Match max_completion_length
     beta = 0.1  # Lower KL penalty for more learning
     learning_rate = 1e-6  # Increased from 1e-7
-    temperature = 0.5  # Lower temperature for more focused sampling
-    top_p = 0.9  # Keep nucleus sampling
+    # Task-conditional sampling
+    p_temperature = 0.5
+    p_top_p = 0.9
+    a_temperature = 0.95
+    a_top_p = 0.95
     
     # TRL optimizer defaults
     adam_beta1 = 0.9
@@ -69,8 +72,7 @@ def manual_grpo_single_batch():
     print(f"  Max new tokens: {max_new_tokens}")
     print(f"  Beta (KL penalty): {beta} (low for more learning)")
     print(f"  Learning rate: {learning_rate}")
-    print(f"  Temperature: {temperature} (focused sampling)")
-    print(f"  Top-p: {top_p} (nucleus sampling)")
+    print(f"  Sampling (task-conditional): P(temp={p_temperature}, top_p={p_top_p}) | A(temp={a_temperature}, top_p={a_top_p})")
     print(f"  AdamW: β1={adam_beta1}, β2={adam_beta2}, ε={adam_epsilon}, decay={weight_decay}")
     
     # ============================================================================
@@ -86,13 +88,13 @@ def manual_grpo_single_batch():
     # Load TWO copies: reference model and training model
     reference_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto"
     )
     
     training_model = AutoModelForCausalLM.from_pretrained(
         model_name, 
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto"
     )
     
@@ -135,8 +137,8 @@ def manual_grpo_single_batch():
 
             # Task-conditional generation parameters
             is_a_task = prompt.startswith("A: ")
-            gen_temperature = 0.95 if is_a_task else 0.5
-            gen_top_p = 0.95 if is_a_task else 0.9
+            gen_temperature = a_temperature if is_a_task else p_temperature
+            gen_top_p = a_top_p if is_a_task else p_top_p
 
             outputs = generate_eval(
                 model,
@@ -210,8 +212,8 @@ def manual_grpo_single_batch():
         
         # Generate completions in eval mode for consistency
         is_a_task = prompt.startswith("A: ")
-        gen_temperature = 0.95 if is_a_task else temperature
-        gen_top_p = 0.95 if is_a_task else top_p
+        gen_temperature = a_temperature if is_a_task else p_temperature
+        gen_top_p = a_top_p if is_a_task else p_top_p
 
         outputs = generate_eval(
             training_model,

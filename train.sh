@@ -63,10 +63,11 @@ echo "Beta (KL coef): ${BETA} (optimal balance)"
 echo "Max completion length: ${MAX_COMPLETION_LENGTH}"
 echo "Gradient clipping: ${MAX_GRAD_NORM}"
 echo "Warmup steps: ${WARMUP_STEPS}"
-echo "Temperature: ${TEMPERATURE} (focused)"
-echo "Top-p: ${TOP_P}"
 if [[ "${TASK_CONDITIONAL_GEN}" == "true" ]]; then
   echo "Task-conditional gen: ON (P: temp=${P_TEMPERATURE}, top_p=${P_TOP_P}; A: temp=${A_TEMPERATURE}, top_p=${A_TOP_P})"
+else
+  echo "Temperature: ${TEMPERATURE} (focused)"
+  echo "Top-p: ${TOP_P}"
 fi
 echo "Eval every: ${EVAL_STEPS} steps"
 echo "Save every: ${SAVE_STEPS} steps"
