@@ -57,7 +57,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     learning_rate = 3e-6
     # Beta schedule
     beta_warmup_steps = 20
-    beta_after_warmup = 0.02
+    beta_after_warmup = 0.005
     beta = 0.0
     # Task-conditional sampling
     p_temperature = 0.7
@@ -73,11 +73,12 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     adam_epsilon = 1e-8
     weight_decay = 0.0
     
-    print(f"📋 Configuration (overfit defaults):")
+    print(f"📋 Configuration (overfit defaults, 2025-09-02r3):")
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
     print(f"  Beta (KL penalty): {beta} (warmup → {beta_after_warmup} after {beta_warmup_steps} steps)")
+    print(f"  KL: token-level KL(p||q) over generated tokens; Adv clip=±2.0; Entropy coef={entropy_coef}")
     print(f"  Steps: {steps} (sequential GRPO updates)")
     if beta_adapt:
         print(f"  Beta adaptation: ON (target_KL≈{target_kl})")
@@ -386,6 +387,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # Normalize advantages by std (TRL default behavior)
     std_expanded = std_rewards_safe.repeat_interleave(num_generations, dim=0)
     advantages_normalized = advantages_tensor / std_expanded
+    advantages_normalized = advantages_normalized.clamp(-2.0, 2.0)
     
     print(f"  Normalized advantages: {advantages_normalized.numpy()}")
     
@@ -480,9 +482,11 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 
                 # Length-normalized terms
                 seq_logprob = tok_logp_pol.sum() / Tgen
-                seq_kl = (tok_logp_pol - tok_logp_ref).pow(2).mean()
-                # Entropy of policy over completion tokens
+                # True per-token KL: KL(p||q) = E_p[log p - log q]
                 probs = torch.exp(pol_logp)
+                tok_kl = (probs * (pol_logp - ref_logp)).sum(dim=-1)
+                seq_kl = tok_kl.mean()
+                # Entropy of policy over completion tokens
                 tok_entropy = -(probs * pol_logp).sum(dim=-1).mean()
                 # Loss: -A * logp + β * KL - c * H
                 pg_term = -advantage * seq_logprob
@@ -722,6 +726,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             std_rewards_safe = torch.clamp(std_rewards, min=1e-6)
             std_expanded = std_rewards_safe.repeat_interleave(num_generations, dim=0)
             advantages_normalized = advantages_tensor / std_expanded
+            advantages_normalized = advantages_normalized.clamp(-2.0, 2.0)
             all_advantages = advantages_normalized.view(batch_size, num_generations).tolist()
 
             # Aggregate advantage metric for table: mean per-prompt advantage range
@@ -765,8 +770,10 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                             ref_logp = F.log_softmax(ref_logits, dim=-1)
                             tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()
                         seq_logprob = tok_logp_pol.sum() / Tgen
-                        seq_kl = (tok_logp_pol - tok_logp_ref).pow(2).mean()
+                        # True per-token KL: KL(p||q) = E_p[log p - log q]
                         probs = torch.exp(pol_logp)
+                        tok_kl = (probs * (pol_logp - ref_logp)).sum(dim=-1)
+                        seq_kl = tok_kl.mean()
                         tok_entropy = -(probs * pol_logp).sum(dim=-1).mean()
                         pg_term = -advantage * seq_logprob
                         kl_term = beta * seq_kl
