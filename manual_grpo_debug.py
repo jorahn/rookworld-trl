@@ -132,16 +132,23 @@ def manual_grpo_single_batch():
         
         for i, prompt in enumerate(prompts):
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            
+
+            # Task-conditional generation parameters
+            is_a_task = prompt.startswith("A: ")
+            gen_temperature = 0.95 if is_a_task else 0.5
+            gen_top_p = 0.95 if is_a_task else 0.9
+
             outputs = generate_eval(
                 model,
                 input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,  # Avoid attention mask warning
                 max_new_tokens=max_new_tokens,
                 num_return_sequences=2,  # Fewer for speed
                 do_sample=True,
-                temperature=0.8,
-                top_p=0.9,
+                temperature=gen_temperature,
+                top_p=gen_top_p,
                 pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
             )
             
             prompt_len = inputs.input_ids.shape[1]
@@ -202,15 +209,21 @@ def manual_grpo_single_batch():
         prompt_length = inputs.input_ids.shape[1]
         
         # Generate completions in eval mode for consistency
+        is_a_task = prompt.startswith("A: ")
+        gen_temperature = 0.95 if is_a_task else temperature
+        gen_top_p = 0.95 if is_a_task else top_p
+
         outputs = generate_eval(
             training_model,
             input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,  # Avoid attention mask warning
             max_new_tokens=max_new_tokens,
             num_return_sequences=num_generations,
             do_sample=True,
-            temperature=temperature,  # Focused sampling (0.5)
-            top_p=top_p,             # Nucleus sampling (0.9)
+            temperature=gen_temperature,
+            top_p=gen_top_p,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             return_dict_in_generate=True,
             output_scores=True
         )

@@ -71,12 +71,18 @@ def inspect_single_batch(
             inputs = tokenizer(prompt, return_tensors="pt")
             
             with torch.no_grad():
+                # Task-conditional generation params: keep P focused, A more permissive
+                is_a_task = prompt.startswith("A: ")
+                gen_temperature = 0.95 if is_a_task else 0.5
+                gen_top_p = 0.95 if is_a_task else 0.9
+
                 outputs = model.generate(
-                    **inputs,
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
                     max_new_tokens=max_completion_length,
                     do_sample=True,
-                    temperature=0.8,
-                    top_p=0.9,
+                    temperature=gen_temperature,
+                    top_p=gen_top_p,
                     pad_token_id=tokenizer.eos_token_id,
                     eos_token_id=tokenizer.eos_token_id
                 )
