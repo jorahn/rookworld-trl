@@ -41,4 +41,5 @@
 ## Security & Configuration Tips
 - Stockfish: install via OS package manager or set `STOCKFISH_PATH` env var. Example: `STOCKFISH_PATH=/usr/bin/stockfish uv run rookworld-train`.
 - Training knobs via env in `train.sh`: `MODEL_NAME`, `OUTPUT_DIR`, `BATCH_SIZE`, `LEARNING_RATE`, `BETA`, `WARMUP_STEPS`.
+- Task-conditional sampling (train.sh): set `TASK_CONDITIONAL_GEN=true` and provide per-task params `P_TEMPERATURE`, `P_TOP_P`, `A_TEMPERATURE`, `A_TOP_P`.
 - Normalize spacing before scoring/generation to avoid KL inflation (see `utils.normalize_spacing`).

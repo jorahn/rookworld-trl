@@ -60,6 +60,9 @@ uv run rookworld-inspect --batch_size 2 --model_name jrahn/RookWorld-LM-124M
 
 # Manual GRPO debugging (step-by-step analysis)
 uv run python manual_grpo_debug.py
+
+# Manual GRPO: sequential steps with beta adaptation and checkpoints
+uv run python manual_grpo_debug.py --steps 3 --beta_adapt --target_kl 0.5 --checkpoint_every 2
 ```
 
 ## 🏗️ Architecture
@@ -102,6 +105,14 @@ Tensorboard: enabled       # Research tracking
   - P: tasks → `temperature=0.5`, `top_p=0.9` (focused)
   - A: tasks → `temperature=0.95`, `top_p=0.95` (slightly more permissive)
 - Attention masks are passed explicitly during generation to avoid tokenizer warnings and ensure stable behavior.
+
+### Task-Conditional Training (rookworld-train)
+- Enable alternating P/A phases with distinct sampling:
+```bash
+uv run rookworld-train --task_conditional_gen \
+  --p_temperature 0.5 --p_top_p 0.9 \
+  --a_temperature 0.95 --a_top_p 0.95
+```
 
 ### Stability Features
 - **Gradient Explosion Protection**: `max_grad_norm=1.0`
@@ -165,6 +176,12 @@ BETA=0.1                         # KL penalty coefficient (optimal balance)
 DATASET_SIZE=2000                # Number of training samples
 MAX_GRAD_NORM=0.5                # Gradient clipping threshold
 WARMUP_STEPS=200                 # Warmup duration
+
+# Task-conditional generation for train.sh
+TASK_CONDITIONAL_GEN=true \
+P_TEMPERATURE=0.5 P_TOP_P=0.9 \
+A_TEMPERATURE=0.95 A_TOP_P=0.95 \
+./train.sh
 ```
 
 ### Troubleshooting
