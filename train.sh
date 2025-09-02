@@ -38,6 +38,13 @@ WARMUP_STEPS="${WARMUP_STEPS:-100}"
 TEMPERATURE="${TEMPERATURE:-0.5}"  # Focused sampling vs TRL default 1.0
 TOP_P="${TOP_P:-0.9}"              # Nucleus sampling vs TRL default 1.0
 
+# Task-conditional generation (train P and A with distinct params)
+TASK_CONDITIONAL_GEN="${TASK_CONDITIONAL_GEN:-false}"
+P_TEMPERATURE="${P_TEMPERATURE:-0.5}"
+P_TOP_P="${P_TOP_P:-0.9}"
+A_TEMPERATURE="${A_TEMPERATURE:-0.95}"
+A_TOP_P="${A_TOP_P:-0.95}"
+
 # Hardware optimizations
 USE_BF16="${USE_BF16:-true}"
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-false}"
@@ -58,6 +65,9 @@ echo "Gradient clipping: ${MAX_GRAD_NORM}"
 echo "Warmup steps: ${WARMUP_STEPS}"
 echo "Temperature: ${TEMPERATURE} (focused)"
 echo "Top-p: ${TOP_P}"
+if [[ "${TASK_CONDITIONAL_GEN}" == "true" ]]; then
+  echo "Task-conditional gen: ON (P: temp=${P_TEMPERATURE}, top_p=${P_TOP_P}; A: temp=${A_TEMPERATURE}, top_p=${A_TOP_P})"
+fi
 echo "Eval every: ${EVAL_STEPS} steps"
 echo "Save every: ${SAVE_STEPS} steps"
 echo "Log every: ${LOGGING_STEPS} steps"
@@ -97,6 +107,15 @@ fi
 
 if [[ -n "${STOCKFISH_PATH}" ]]; then
     ARGS+=(--stockfish_path "${STOCKFISH_PATH}")
+fi
+
+# Add task-conditional flags
+if [[ "${TASK_CONDITIONAL_GEN}" == "true" ]]; then
+    ARGS+=(--task_conditional_gen \
+           --p_temperature "${P_TEMPERATURE}" \
+           --p_top_p "${P_TOP_P}" \
+           --a_temperature "${A_TEMPERATURE}" \
+           --a_top_p "${A_TOP_P}")
 fi
 
 # Run training
