@@ -20,6 +20,11 @@
 - Type check: `uv run mypy src`
 - Tests: `uv run pytest -q`
 
+## Reproducibility & Determinism
+- Manual debug: use `--seed` (default `42`) for reproducible sampling and batching.
+- Reward scoring is depth-based (fixed-depth Stockfish) to reduce timing jitter.
+- Overfit mode: `--overfit_single_batch` reuses the same batch each step to observe update dynamics.
+
 ## Coding Style & Naming Conventions
 - Python 3.9+; Black line length 88; Isort profile “black”.
 - Use type hints; `mypy` strictness: disallow untyped defs.

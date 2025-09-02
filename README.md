@@ -1,5 +1,7 @@
 # RookWorld TRL - Experimental GRPO Chess Training
 
+Co-authors: Claude Code, OpenAI Codex
+
 An **experimental implementation** of **Group Relative Policy Optimization (GRPO)** for chess using HuggingFace Transformers and TRL. This project explores GRPO training dynamics, debugging model degradation issues, and optimizing parameters for chess language models.
 
 ## 🎯 Overview
@@ -59,10 +61,13 @@ uv run rookworld-inspect --batch_size 4
 uv run rookworld-inspect --batch_size 2 --model_name jrahn/RookWorld-LM-124M
 
 # Manual GRPO debugging (step-by-step analysis)
-uv run python manual_grpo_debug.py
+uv run python manual_grpo_debug.py --seed 42
 
 # Manual GRPO: sequential steps with beta adaptation and checkpoints
-uv run python manual_grpo_debug.py --steps 3 --beta_adapt --target_kl 0.5 --checkpoint_every 2
+uv run python manual_grpo_debug.py --steps 3 --beta_adapt --target_kl 0.5 --checkpoint_every 2 --seed 42
+
+# Manual GRPO: overfit a single batch (useful diagnostic)
+uv run python manual_grpo_debug.py --steps 10 --overfit_single_batch --seed 42
 ```
 
 ## 🏗️ Architecture
@@ -105,6 +110,15 @@ Tensorboard: enabled       # Research tracking
   - P: tasks → `temperature=0.5`, `top_p=0.9` (focused)
   - A: tasks → `temperature=0.95`, `top_p=0.95` (slightly more permissive)
 - Attention masks are passed explicitly during generation to avoid tokenizer warnings and ensure stable behavior.
+
+### Reproducibility & Determinism
+- Use `--seed` with manual debug to make runs reproducible (default `42`).
+- Scoring uses fixed-depth Stockfish analysis for deterministic rewards.
+- Sampling determinism: RNG is seeded per generate call; repeated runs with the same `--seed` match closely.
+- Example:
+```bash
+uv run python manual_grpo_debug.py --steps 2 --overfit_single_batch --seed 42
+```
 
 ### Task-Conditional Training (rookworld-train)
 - Enable alternating P/A phases with distinct sampling:
