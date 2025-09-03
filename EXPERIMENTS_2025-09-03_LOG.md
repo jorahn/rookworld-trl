@@ -91,3 +91,11 @@
   - MA10: 0.4236 → 0.4101 (Δ −0.0135); BestPost=0.4550@step6; WorstPost=0.3490@step23.
   - Timing: Avg step ≈33.7s; Last step ≈33.3s.
 - Interpretation: Higher gens shows promise (clear gain at 20 steps), but over ~30 steps the curve oscillates. Next probes: more steps at gens=24 or bump to gens=32 with a shorter warmup and slightly lower entropy to stabilize later steps.
+
+## 100-step High-Gens (Sept 3, evening)
+- Run: bs=8, gens=32, GA=1, steps=100, warmup=10, entropy=0.003. Full log: logs/manual_grpo_debug_run-250903-155627.log
+- Result summary:
+  - StartPost=0.4310 → EndPost=0.4370 (Δ +0.0060); PosSteps=55, NegSteps=45.
+  - MA20: 0.4221 → 0.4121 (Δ −0.0100); indicates oscillations despite small net gain.
+  - Timing: Avg step ≈39.2s; Last step ≈38.5s (as expected, slower than gens=24).
+- Read: Increasing gens to 32 at 100 steps produced a modest net gain but the moving average slope was slightly negative over the last window, suggesting lingering variance. Next: extend horizon further (200–300 steps) or pair higher gens with earlier KL engagement and slightly lower entropy to smooth late-curve behavior.
