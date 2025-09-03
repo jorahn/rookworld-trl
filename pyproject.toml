@@ -67,9 +67,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jrahn/rookworld-trl"
-Repository = "https://github.com/jrahn/rookworld-trl"
-Issues = "https://github.com/jrahn/rookworld-trl/issues"
+Homepage = "https://github.com/jorahn/rookworld-trl"
+Repository = "https://github.com/jorahn/rookworld-trl"
+Issues = "https://github.com/jorahn/rookworld-trl/issues"
 
 [project.scripts]
 rookworld-train = "rookworld_trl.train:main"

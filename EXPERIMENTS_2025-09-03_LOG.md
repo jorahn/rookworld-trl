@@ -99,3 +99,25 @@
   - MA20: 0.4221 → 0.4121 (Δ −0.0100); indicates oscillations despite small net gain.
   - Timing: Avg step ≈39.2s; Last step ≈38.5s (as expected, slower than gens=24).
 - Read: Increasing gens to 32 at 100 steps produced a modest net gain but the moving average slope was slightly negative over the last window, suggesting lingering variance. Next: extend horizon further (200–300 steps) or pair higher gens with earlier KL engagement and slightly lower entropy to smooth late-curve behavior.
+ 
+## True GA Applied + Quick Validation (Sept 3, evening)
+- Implementation change:
+  - Converted `manual_grpo_debug.py` to true gradient accumulation: accumulate per-sample losses (scaled by 1/(batch_size·gens)) and perform a single clip/step/zero per batch per GRPO step. Removed intra-batch micro-updates.
+  - Rationale: Make per-step updates equivalent to a frozen batch objective and avoid optimizer/clipping cadence artifacts.
+
+- Sanity tests (2 steps on P-only fixed batch):
+  - A: `bs=2, gens=4, ga=1` → 0.0786 → 0.0786 (Δ +0.0000). One optimizer update per step (confirmed).
+  - B: `bs=2, gens=4, ga=4` → Same single-update behavior and identical outcome (as intended with true GA).
+  - C: `bs=2, gens=8, ga=1` → 0.0786 → 0.0932 (Δ +0.0146). Slight positive movement with higher gens even over 2 steps.
+
+- Interpretation:
+  - The script now reflects true GA semantics. Very short runs with tiny batch/gens show little change, as expected. Increasing gens reduces variance and can nudge rewards upward even at 2 steps.
+
+- Next actions for overfit success:
+  - Run 50-step overfit on the same fixed P-only batch with two configs:
+    - Baseline: `bs=8, gens=24, warmup=20, entropy=0.005, beta_after=0.005, lr=2e-6`.
+    - High-gens: `bs=8, gens=32, warmup=10, entropy=0.003, beta_after=0.0025–0.005, lr=2e-6`.
+  - Keep stochastic training generation; monitor 20-step MA of greedy reward, KL%, grad norms, and advantage variance. If slope is flat and stability holds, bump LR to 3e-6.
+
+- Misc:
+  - Updated `pyproject.toml` URLs to `https://github.com/jorahn/rookworld-trl`.

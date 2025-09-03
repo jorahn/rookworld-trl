@@ -102,7 +102,9 @@ def manual_grpo_single_batch(
         print(f"  ⚠️ --grad_accum_steps ({grad_accum_steps}) > total_samples ({total_samples}); capping to {total_samples}")
         grad_accum_steps = total_samples
     microbatch_size = math.ceil(total_samples / grad_accum_steps)
-    print(f"  GA (micro-updates per batch): {grad_accum_steps} → microbatch_size={microbatch_size}, effective_batch={total_samples}")
+    print(f"  GA: true accumulation; one optimizer step per batch; effective_batch={total_samples}")
+    if grad_accum_steps != 1:
+        print(f"  Note: --grad_accum_steps={grad_accum_steps} is ignored for stepping (kept for future memory chunking)")
     if beta_adapt:
         print(f"  Beta adaptation: ON (target_KL≈{target_kl})")
     if overfit_single_batch:
@@ -519,19 +521,7 @@ def manual_grpo_single_batch(
                 print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
                 print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
                 processed += 1
-                if (processed % microbatch_size == 0) or (processed == (batch_size * num_generations)):
-                    # Perform a micro-update
-                    total_grad_norm = 0.0
-                    for name, param in training_model.named_parameters():
-                        if param.grad is not None:
-                            grad_norm = param.grad.data.norm(2).item()
-                            total_grad_norm += grad_norm ** 2
-                    total_grad_norm = total_grad_norm ** 0.5
-                    print(f"    ⛳ Micro-update {steps_done+1}/{grad_accum_steps}: grad_norm={total_grad_norm:.2f}")
-                    torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    steps_done += 1
+                # True GA: defer optimizer step until all samples processed
             else:
                 print(f"  Gen {j+1}: Empty completion - skipping")
         avg_prompt_pg = prompt_pg_loss / num_generations
@@ -831,18 +821,7 @@ def manual_grpo_single_batch(
                         print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
                         print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
                         processed += 1
-                        if (processed % microbatch_size == 0) or (processed == (batch_size * num_generations)):
-                            total_grad_norm = 0.0
-                            for name, param in training_model.named_parameters():
-                                if param.grad is not None:
-                                    grad_norm = param.grad.data.norm(2).item()
-                                    total_grad_norm += grad_norm ** 2
-                            total_grad_norm = total_grad_norm ** 0.5
-                            print(f"    ⛳ Micro-update {steps_done+1}/{grad_accum_steps}: grad_norm={total_grad_norm:.2f}")
-                            torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-                            optimizer.step()
-                            optimizer.zero_grad(set_to_none=True)
-                            steps_done += 1
+                        # True GA: defer optimizer step until all samples processed
                     else:
                         print(f"  Gen {j+1}: Empty completion - skipping")
                 avg_prompt_pg = prompt_pg_loss / num_generations
@@ -999,7 +978,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=4, help="prompts per microbatch")
     parser.add_argument("--num_generations", "--gens", type=int, default=12, help="completions per prompt (GRPO group size)")
-    parser.add_argument("--grad_accum_steps", "--ga", type=int, default=1, help="number of microbatches to process within a batch (manual debug splits flattened samples into this many chunks; steps per chunk)")
+    parser.add_argument(
+        "--grad_accum_steps", "--ga", type=int, default=1,
+        help="reserved: currently ignored for stepping (true GA does a single optimizer step per batch)"
+    )
     parser.add_argument("--beta_warmup_steps", type=int, default=20, help="warmup steps with beta=0 before switching to beta_after_warmup")
     parser.add_argument("--entropy_coef", type=float, default=0.005, help="entropy regularization coefficient")
     args = parser.parse_args()
