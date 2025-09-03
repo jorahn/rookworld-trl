@@ -121,3 +121,21 @@
 
 - Misc:
   - Updated `pyproject.toml` URLs to `https://github.com/jorahn/rookworld-trl`.
+
+## 300-step Remote Run (Sept 3, UTC)
+- File: `logs/manual_grpo_debug_run-250903-164312.log` (filename normalized +2h to UTC; remote TZ was −2).
+- Setup: overfit_single_batch (fixed P-only batch), steps=300, warmup=10 → β=0.005, true token-level KL(p||q), entropy=0.003, greedy post-step eval.
+- Aggregate results:
+  - StartPost=0.335 → EndPost=0.349 (Δ +0.0137).
+  - Step deltas: pos=149, neg=139, zero=12 (oscillatory but slight positive drift).
+  - Averages across steps: Pre=0.34185, Post=0.34189, Δ≈+5.7e−05 (net near-zero due to cancellation across ups/downs).
+  - KL: avg 0.0539 (post‑warmup steady ≈0.056); KL% avg ≈44.7% (typical 25–60%, spikes up to ~80%).
+  - GradN: avg ≈5.15; Advantages: avg ≈3.17; β avg ≈0.00483.
+  - Timing: per‑step total ≈27s (first step ~43s incl. setup and initial eval). Generation ~10.7s; rewards ~3.4–3.7s; loss update ~7.4s; post‑eval ~5.5s.
+- Stability & notes:
+  - No NaNs, OOMs, or divergence. One early "low std" warning before β engaged; healthy reward variance thereafter.
+  - KL remained controlled after warmup; gradients stable; no runaway behavior observed.
+- Conclusions (for this run):
+  - Training is stable with β=0.005 and true token‑level KL. Overfit‑batch reward shows incremental gains with expected oscillations.
+  - Variance appears to limit monotonic improvement more than regularization. Increasing within‑prompt generations (groups) or effective batch via GA should smooth curves.
+  - If more smoothing is needed, consider slightly earlier/smaller warmup or β in the 0.005–0.01 range paired with entropy 0.003–0.005; keep true KL.
