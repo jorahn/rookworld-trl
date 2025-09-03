@@ -53,3 +53,14 @@
 - Risk: Larger eff_batch reduces exploration diversity if entropy too low.
   - Mitigation: Maintain entropy=0.005 initially; optionally anneal late (≥200 steps).
 
+
+
+## Update (late Sept 3)
+- Capacity vs. utilization: Two-step bs=32 run shows low VRAM (~3 GB of 12 GB) and high compute utilization (>90%), but throughput is not the goal right now. We could leverage higher VRAM via chunked grad accumulation to speed iteration, but we will keep complexity low for now.
+- Effect of larger batch: Increasing batch size to 32 did not materially change training dynamics (reward slope/stability) yet significantly slows experiment iteration. Decision: continue with lower batch size for local iterations.
+- Next focus: Increase num_generations (within-prompt) to reduce variance where GRPO signal lives.
+  - Suggested equal-compute probes on the same fixed batch:
+    - A1: lower bs, higher gens (e.g., bs=8, gens=16)
+    - A2: current baseline (e.g., bs=16, gens=12)
+  - Keep r5 params: true KL, warmup 20 → β=0.005, entropy 0.005, LR 2e-6, greedy eval, P-only batch.
+- Timing: Phase timings are now logged (r5); use them to monitor where time is spent.

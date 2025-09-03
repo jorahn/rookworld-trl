@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import argparse
+import time
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from src.rookworld_trl.rewards import create_reward_function
 from src.rookworld_trl.dataset import RookWorldDataGenerator
@@ -42,7 +43,7 @@ def generate_eval(model, **kwargs):
         model.train()
     return outputs
 
-def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl: float = 0.5, checkpoint_every: int = 0, overfit_single_batch: bool = False, seed: int = 42):
+def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl: float = 0.5, checkpoint_every: int = 0, overfit_single_batch: bool = False, seed: int = 42, batch_size: int = 4):
     """
     Manually implement GRPO for a single batch with extensive logging
     """
@@ -51,7 +52,6 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print("=" * 70)
     
     # Configuration tuned for overfitting a single batch
-    batch_size = 4
     num_generations = 12
     max_new_tokens = 128
     learning_rate = 2e-6
@@ -73,7 +73,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     adam_epsilon = 1e-8
     weight_decay = 0.0
     
-    print(f"📋 Configuration (overfit defaults, 2025-09-02r4):")
+    print(f"📋 Configuration (overfit defaults, 2025-09-03r5):")
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
@@ -93,6 +93,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # PHASE 1: SETUP
     # ============================================================================
     print(f"\n{'='*20} PHASE 1: SETUP {'='*20}")
+    _step_t0 = time.time()
+    _t_setup0 = time.time()
     
     # Load models
     print(f"📥 Loading base model...")
@@ -128,7 +130,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Load dataset samples once (already shuffled in generator)
     print(f"📊 Loading mixed batch...")
-    data_generator = RookWorldDataGenerator(dataset_size=20, seed=seed)
+    # Ensure we have enough prompts available for larger batches
+    dg_size = max(50, batch_size * 3)
+    data_generator = RookWorldDataGenerator(dataset_size=dg_size, seed=seed)
     # Prefer P-only prompts for overfit batch, fallback to mixed
     p_only = [prompt for t, prompt, _, _ in data_generator.samples if t == 'P']
     if len(p_only) >= batch_size:
@@ -152,6 +156,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"🧾 Using dataset prompts [{start_idx}:{end_idx}) of {total_prompts} (wrap-around: {'yes' if wrap else 'no'})")
     
     print(f"✅ Setup complete. Batch composition:")
+    _t_setup = time.time() - _t_setup0
+    print(f"[timing] setup: {_t_setup:.2f}s")
     p_count = sum(1 for p in prompts if p.startswith("P: "))
     a_count = sum(1 for p in prompts if p.startswith("A: "))
     print(f"  P: tasks: {p_count}/{batch_size}")
@@ -161,6 +167,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # PHASE 2: INITIAL MODEL PERFORMANCE TEST
     # ============================================================================
     print(f"\n{'='*20} PHASE 2: INITIAL MODEL PERFORMANCE {'='*20}")
+    _t_init_eval0 = time.time()
     
     def test_model_performance(model, model_name):
         """Test model performance and return average reward (deterministic, greedy)"""
@@ -207,6 +214,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Test initial performance
     initial_performance = test_model_performance(training_model, "INITIAL TRAINING MODEL")
+    _t_init_eval = time.time() - _t_init_eval0
+    print(f"[timing] initial_eval: {_t_init_eval:.2f}s")
     
     # Collect per-step metrics for overview
     step_metrics = []
@@ -231,6 +240,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     all_ref_log_probs = []
     
     print(f"🤖 Generating completions for GRPO training...")
+    _t_gen0 = time.time()
     
     for i, prompt in enumerate(prompts):
         print(f"\n🎯 Prompt {i+1}: {prompt[:60]}...")
@@ -323,11 +333,14 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
         unique_completions = len(set(prompt_completions))
         if unique_completions == 1:
             print(f"    ⚠️  All {num_generations} completions are IDENTICAL!")
+    _t_generation = time.time() - _t_gen0
+    print(f"[timing] generation: {_t_generation:.2f}s")
     
     # ============================================================================
     # PHASE 4: REWARD CALCULATION
     # ============================================================================
     print(f"\n{'='*20} PHASE 4: REWARD CALCULATION {'='*20}")
+    _t_rewards0 = time.time()
     
     all_rewards = []
     
@@ -348,11 +361,14 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             print(f"  ❌ Error scoring: {e}")
             dummy_scores = [-0.5] * num_generations
             all_rewards.append(dummy_scores)
+    _t_rewards = time.time() - _t_rewards0
+    print(f"[timing] rewards: {_t_rewards:.2f}s")
     
     # ============================================================================
     # PHASE 5: TRL EXACT ADVANTAGE CALCULATION
     # ============================================================================
     print(f"\n{'='*20} PHASE 5: TRL EXACT ADVANTAGE CALCULATION {'='*20}")
+    _t_adv0 = time.time()
     
     # Convert to tensors for exact TRL calculation
     all_rewards_tensor = torch.tensor([reward for reward_group in all_rewards for reward in reward_group])
@@ -419,148 +435,122 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     for advantages in all_advantages:
         adv_range_values.append(max(advantages) - min(advantages))
     step_adv_metric = float(np.mean(adv_range_values)) if adv_range_values else 0.0
+    _t_adv = time.time() - _t_adv0
+    print(f"[timing] advantages: {_t_adv:.2f}s")
     
     # ============================================================================
-    # PHASE 6-8: CORRECTED GRPO LOSS CALCULATION WITH PROPER KL
+    # PHASE 6-8: CORRECTED GRPO LOSS CALCULATION WITH PROPER KL (grad accumulation)
     # ============================================================================
     print(f"\n{'='*20} PHASE 6-8: CORRECTED GRPO LOSS CALCULATION {'='*20}")
-    
-    # Enable gradients for training model
     training_model.train()
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
+    _t_loss0 = time.time()
     
-    total_pg_loss = 0.0
+    total_pg_loss = 0.0  # floats for logging
     total_kl_loss = 0.0
+    scale = 1.0 / (batch_size * num_generations)
+    print(f"🔄 Computing GRPO loss with proper token-level KL and accumulating grads...")
     
-    print(f"🔄 Computing GRPO loss with proper token-level KL...")
-    
-    for i, (prompt, completions, advantages) in enumerate(
-        zip(prompts, all_completions, all_advantages)
-    ):
+    for i, (prompt, completions, advantages) in enumerate(zip(prompts, all_completions, all_advantages)):
         print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
-        
-        # Use normalized prompt for consistent tokenization
         normalized_prompt = normalize_spacing(prompt)
         inputs = tokenizer(normalized_prompt, return_tensors="pt").to(training_model.device)
         prompt_length = inputs.input_ids.shape[1]
-        
         prompt_pg_loss = 0.0
         prompt_kl_loss = 0.0
-        
         for j, (completion, advantage) in enumerate(zip(completions, advantages)):
-            # Normalize prompt and completion for consistent tokenization
-            normalized_prompt = normalize_spacing(prompt)
             normalized_completion = normalize_spacing(completion)
-            
-            # Tokenize full sequence (normalized prompt + normalized completion)  
             full_text = normalized_prompt + " " + normalized_completion
             full_tokens = tokenizer(full_text, return_tensors="pt").to(training_model.device)
-            
-            # Forward pass through training model (WITH gradients)
             outputs = training_model(full_tokens.input_ids)
             logits = outputs.logits[0]
-            
-            # Completion span
             completion_start = prompt_length - 1
             completion_end = full_tokens.input_ids.shape[1] - 1
-            
             if completion_end > completion_start:
                 targets = full_tokens.input_ids[0][prompt_length:completion_end+1]
                 Tgen = len(targets)
-                
-                # Policy logits and log-probs (WITH gradients)
-                pol_logits = logits[completion_start:completion_end]  # [Tgen, V]
+                pol_logits = logits[completion_start:completion_end]
                 pol_logp = F.log_softmax(pol_logits, dim=-1)
-                tok_logp_pol = pol_logp.gather(1, targets.unsqueeze(1)).squeeze()  # [Tgen]
-                
-                # Reference pass (NO gradients)
+                tok_logp_pol = pol_logp.gather(1, targets.unsqueeze(1)).squeeze()
                 with torch.no_grad():
                     ref_out = reference_model(full_tokens.input_ids)
-                    ref_logits = ref_out.logits[0][completion_start:completion_end]  # [Tgen, V]
+                    ref_logits = ref_out.logits[0][completion_start:completion_end]
                     ref_logp = F.log_softmax(ref_logits, dim=-1)
-                    tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()  # [Tgen]
-                
-                # Length-normalized terms
+                    tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()
                 seq_logprob = tok_logp_pol.sum() / Tgen
-                # True per-token KL: KL(p||q) = E_p[log p - log q]
                 probs = torch.exp(pol_logp)
                 tok_kl = (probs * (pol_logp - ref_logp)).sum(dim=-1)
                 seq_kl = tok_kl.mean()
-                # Entropy of policy over completion tokens
                 tok_entropy = -(probs * pol_logp).sum(dim=-1).mean()
-                # Loss: -A * logp + β * KL - c * H
                 pg_term = -advantage * seq_logprob
                 kl_term = beta * seq_kl
                 ent_term = -entropy_coef * tok_entropy
-                sample_loss = pg_term + kl_term + ent_term
-                
-                prompt_pg_loss += pg_term
-                prompt_kl_loss += kl_term
-                
-                print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}, H={tok_entropy:.3f}")
-                print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, EntReg={ent_term:.3f}, total={sample_loss:.3f}")
+                sample_loss = (pg_term + kl_term + ent_term) * scale
+                sample_loss.backward()
+                pg_v = float(pg_term.detach().item())
+                kl_v = float(kl_term.detach().item())
+                ent_v = float(ent_term.detach().item())
+                prompt_pg_loss += pg_v
+                prompt_kl_loss += kl_v
+                print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
+                print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
             else:
                 print(f"  Gen {j+1}: Empty completion - skipping")
-        
         avg_prompt_pg = prompt_pg_loss / num_generations
         avg_prompt_kl = prompt_kl_loss / num_generations
         total_pg_loss += avg_prompt_pg
         total_kl_loss += avg_prompt_kl
-        
         print(f"  📊 Prompt averages: PG={avg_prompt_pg:.3f}, KL={avg_prompt_kl:.3f}")
     
-    # Average losses across batch
-    avg_pg_loss = total_pg_loss / batch_size
-    avg_kl_loss = total_kl_loss / batch_size
-    total_loss = avg_pg_loss + avg_kl_loss
+    # Average losses across batch (floats)
+    avg_pg_loss_val = total_pg_loss / batch_size
+    avg_kl_loss_val = total_kl_loss / batch_size
+    total_loss_val = avg_pg_loss_val + avg_kl_loss_val
     
-    print(f"\n🔢 CORRECTED Loss Breakdown:")
-    print(f"  Policy Gradient Loss: {avg_pg_loss:8.3f}")
-    print(f"  KL Loss (with gradients): {avg_kl_loss:8.3f}")
-    print(f"  Total Loss:          ={total_loss:8.3f}")
-    print(f"")
-    kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
+    print(f"\n🔢 CORRECTED Loss Breakdown (accumulated):")
+    print(f"  Policy Gradient Loss: {avg_pg_loss_val:8.3f}")
+    print(f"  KL Loss (with gradients): {avg_kl_loss_val:8.3f}")
+    print(f"  Total Loss:          ={total_loss_val:8.3f}")
+    kl_ratio = abs(avg_kl_loss_val) / (abs(avg_pg_loss_val) + abs(avg_kl_loss_val) + 1e-8) * 100
     print(f"  KL penalty ratio: {kl_ratio:.1f}%")
     
-    # Backward pass with proper gradients
-    print(f"\n🔄 Performing corrected gradient update...")
-    if total_loss.requires_grad:
-        total_loss.backward()
-        
-        # Check gradient norms
-        total_grad_norm = 0.0
-        for name, param in training_model.named_parameters():
-            if param.grad is not None:
-                grad_norm = param.grad.data.norm(2).item()
-                total_grad_norm += grad_norm ** 2
-        
-        total_grad_norm = total_grad_norm ** 0.5
-        print(f"  Total gradient norm: {total_grad_norm:.2f}")
-        
-        # Apply gradient clipping
-        torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-        
-        # Optimizer step
-        optimizer.step()
-        print(f"  ✅ Gradient update applied with proper KL regularization")
-    else:
-        print(f"  ⚠️  No gradients to update")
+    # Optimizer step
+    print(f"\n🔄 Performing gradient update...")
+    total_grad_norm = 0.0
+    for name, param in training_model.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.data.norm(2).item()
+            total_grad_norm += grad_norm ** 2
+    total_grad_norm = total_grad_norm ** 0.5
+    print(f"  Total gradient norm: {total_grad_norm:.2f}")
+    torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    _t_loss = time.time() - _t_loss0
+    print(f"[timing] loss_update: {_t_loss:.2f}s")
+    print(f"  ✅ Gradient update applied with proper KL regularization")
     
     # ============================================================================
     # PHASE 9: POST-UPDATE PERFORMANCE TEST
     # ============================================================================
     print(f"\n{'='*20} PHASE 9: POST-UPDATE PERFORMANCE {'='*20}")
-    
+    _t_post_eval0 = time.time()
     # Test performance after one GRPO step
     post_performance = test_model_performance(training_model, "POST-UPDATE TRAINING MODEL (step 1)")
+    _t_post_eval = time.time() - _t_post_eval0
+    print(f"[timing] post_eval: {_t_post_eval:.2f}s")
     
     # ============================================================================
     # PHASE 10: ANALYSIS
     # ============================================================================
     print(f"\n{'='*20} PHASE 10: ANALYSIS {'='*20}")
+    _t_analysis0 = time.time()
     
     performance_change = post_performance - initial_performance
     
+    _t_analysis = time.time() - _t_analysis0
+    _step_secs = time.time() - _step_t0
+    print(f"\n⏱️ Timing (step 1): setup={_t_setup:.2f}s, initial_eval={_t_init_eval:.2f}s, generation={_t_generation:.2f}s, rewards={_t_rewards:.2f}s, advantages={_t_adv:.2f}s, loss_update={_t_loss:.2f}s, post_eval={_t_post_eval:.2f}s, analysis={_t_analysis:.2f}s, total={_step_secs:.2f}s")
     print(f"🔍 Corrected GRPO Step Impact:")
     print(f"  Initial performance: {initial_performance:.4f}")
     print(f"  Post-update performance: {post_performance:.4f}")
@@ -574,8 +564,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"  Difference: {post_performance - training_avg_reward:.4f}")
     
     # Analysis of KL regularization effectiveness
-    kl_magnitude = abs(avg_kl_loss)
-    pg_magnitude = abs(avg_pg_loss)
+    kl_magnitude = abs(avg_kl_loss_val)
+    pg_magnitude = abs(avg_pg_loss_val)
     
     print(f"\n🔍 KL Regularization Analysis:")
     print(f"  KL magnitude: {kl_magnitude:.3f}")
@@ -590,9 +580,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     
     # Record metrics for step 1
     # Safely convert tensors to scalars for metrics
-    _pg_val = avg_pg_loss.detach().item() if torch.is_tensor(avg_pg_loss) else float(avg_pg_loss)
-    _kl_val = avg_kl_loss.detach().item() if torch.is_tensor(avg_kl_loss) else float(avg_kl_loss)
-    _kl_ratio_val = float(kl_ratio.detach().item() if torch.is_tensor(kl_ratio) else kl_ratio)
+    _pg_val = float(avg_pg_loss_val)
+    _kl_val = float(avg_kl_loss_val)
+    _kl_ratio_val = float(kl_ratio)
 
     step_metrics.append({
         'step': 1,
@@ -605,6 +595,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
         'adv': step_adv_metric,
         'grad_norm': float(total_grad_norm) if 'total_grad_norm' in locals() else None,
         'beta': float(beta),
+        'sec': float(_step_secs),
     })
 
     # Prepare for optional additional steps
@@ -613,6 +604,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     # Sequential extra steps (flat style, explicit)
     if steps > 1:
         for step_idx in range(2, steps + 1):
+            _step_t0 = time.time()
             print(f"\n{'='*70}")
             print(f"🧭 SEQUENTIAL STEP {step_idx}/{steps}")
             print(f"{'='*70}")
@@ -638,6 +630,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             all_log_probs = []
             all_ref_log_probs = []
             print(f"\n🤖 Generating completions for GRPO training (step {step_idx})...")
+            _t_gen0 = time.time()
             for i, prompt in enumerate(prompts):
                 print(f"\n🎯 Prompt {i+1}: {prompt[:60]}...")
                 inputs = tokenizer(prompt, return_tensors='pt').to(training_model.device)
@@ -695,9 +688,12 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 all_completions.append(prompt_completions)
                 all_log_probs.append(prompt_log_probs)
                 all_ref_log_probs.append(prompt_ref_log_probs)
+            _t_generation = time.time() - _t_gen0
+            print(f"[timing] generation: {_t_generation:.2f}s")
 
             # ===== Rewards (same as PHASE 4) =====
             print(f"\n{'='*20} PHASE 4: REWARD CALCULATION (step {step_idx}) {'='*20}")
+            _t_rewards0 = time.time()
             all_rewards = []
             for i, (prompt, completions) in enumerate(zip(prompts, all_completions)):
                 print(f"\n🎯 Scoring Prompt {i+1} completions:")
@@ -711,9 +707,12 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 except Exception as e:
                     print(f"  ❌ Error scoring: {e}")
                     all_rewards.append([-0.5] * num_generations)
+            _t_rewards = time.time() - _t_rewards0
+            print(f"[timing] rewards: {_t_rewards:.2f}s")
 
             # ===== Advantages (same as PHASE 5) =====
             print(f"\n{'='*20} PHASE 5: TRL EXACT ADVANTAGE CALCULATION (step {step_idx}) {'='*20}")
+            _t_adv0 = time.time()
             all_rewards_tensor = torch.tensor([r for g in all_rewards for r in g])
             print(f"🔢 TRL Advantage Calculation (exact formula):")
             print(f"  Total rewards shape: {all_rewards_tensor.shape}")
@@ -735,13 +734,17 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 adv_range_values.append(max(advantages) - min(advantages))
             step_adv_metric = float(np.mean(adv_range_values)) if adv_range_values else 0.0
 
+            _t_adv = time.time() - _t_adv0
+            print(f"[timing] advantages: {_t_adv:.2f}s")
             # ===== Loss & update (same as PHASE 6-8) =====
             print(f"\n{'='*20} PHASE 6-8: CORRECTED GRPO LOSS CALCULATION (step {step_idx}) {'='*20}")
+            _t_loss0 = time.time()
             training_model.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             total_pg_loss = 0.0
             total_kl_loss = 0.0
-            print(f"🔄 Computing GRPO loss with proper token-level KL...")
+            scale = 1.0 / (batch_size * num_generations)
+            print(f"🔄 Computing GRPO loss with proper token-level KL and accumulating grads...")
             for i, (prompt, completions, advantages) in enumerate(zip(prompts, all_completions, all_advantages)):
                 print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
                 normalized_prompt = normalize_spacing(prompt)
@@ -770,7 +773,6 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                             ref_logp = F.log_softmax(ref_logits, dim=-1)
                             tok_logp_ref = ref_logp.gather(1, targets.unsqueeze(1)).squeeze()
                         seq_logprob = tok_logp_pol.sum() / Tgen
-                        # True per-token KL: KL(p||q) = E_p[log p - log q]
                         probs = torch.exp(pol_logp)
                         tok_kl = (probs * (pol_logp - ref_logp)).sum(dim=-1)
                         seq_kl = tok_kl.mean()
@@ -778,11 +780,15 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                         pg_term = -advantage * seq_logprob
                         kl_term = beta * seq_kl
                         ent_term = -entropy_coef * tok_entropy
-                        sample_loss = pg_term + kl_term + ent_term
-                        prompt_pg_loss += pg_term
-                        prompt_kl_loss += kl_term
-                        print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={seq_logprob:.3f}, kl={seq_kl:.3f}, H={tok_entropy:.3f}")
-                        print(f"         PG={pg_term:.3f}, KL_penalty={kl_term:.3f}, EntReg={ent_term:.3f}, total={sample_loss:.3f}")
+                        sample_loss = (pg_term + kl_term + ent_term) * scale
+                        sample_loss.backward()
+                        pg_v = float(pg_term.detach().item())
+                        kl_v = float(kl_term.detach().item())
+                        ent_v = float(ent_term.detach().item())
+                        prompt_pg_loss += pg_v
+                        prompt_kl_loss += kl_v
+                        print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
+                        print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
                     else:
                         print(f"  Gen {j+1}: Empty completion - skipping")
                 avg_prompt_pg = prompt_pg_loss / num_generations
@@ -790,31 +796,29 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 total_pg_loss += avg_prompt_pg
                 total_kl_loss += avg_prompt_kl
                 print(f"  📊 Prompt averages: PG={avg_prompt_pg:.3f}, KL={avg_prompt_kl:.3f}")
-            avg_pg_loss = total_pg_loss / batch_size
-            avg_kl_loss = total_kl_loss / batch_size
-            total_loss = avg_pg_loss + avg_kl_loss
+            avg_pg_loss_val = total_pg_loss / batch_size
+            avg_kl_loss_val = total_kl_loss / batch_size
+            total_loss_val = avg_pg_loss_val + avg_kl_loss_val
             print(f"\n🔢 CORRECTED Loss Breakdown:")
-            print(f"  Policy Gradient Loss: {avg_pg_loss:8.3f}")
-            print(f"  KL Loss (with gradients): {avg_kl_loss:8.3f}")
-            print(f"  Total Loss:          ={total_loss:8.3f}")
-            kl_ratio = abs(avg_kl_loss) / (abs(avg_pg_loss) + abs(avg_kl_loss) + 1e-8) * 100
+            print(f"  Policy Gradient Loss: {avg_pg_loss_val:8.3f}")
+            print(f"  KL Loss (with gradients): {avg_kl_loss_val:8.3f}")
+            print(f"  Total Loss:          ={total_loss_val:8.3f}")
+            kl_ratio = abs(avg_kl_loss_val) / (abs(avg_pg_loss_val) + abs(avg_kl_loss_val) + 1e-8) * 100
             print(f"  KL penalty ratio: {kl_ratio:.1f}%")
-            print(f"\n🔄 Performing corrected gradient update (step {step_idx})...")
-            if total_loss.requires_grad:
-                optimizer.zero_grad(set_to_none=True)
-                total_loss.backward()
-                total_grad_norm = 0.0
-                for name, param in training_model.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = param.grad.data.norm(2).item()
-                        total_grad_norm += grad_norm ** 2
-                total_grad_norm = total_grad_norm ** 0.5
-                print(f"  Total gradient norm: {total_grad_norm:.2f}")
-                torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-                optimizer.step()
-                print(f"  ✅ Gradient update applied with proper KL regularization")
-            else:
-                print(f"  ⚠️  No gradients to update")
+            print(f"\n🔄 Performing gradient update (step {step_idx})...")
+            total_grad_norm = 0.0
+            for name, param in training_model.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.data.norm(2).item()
+                    total_grad_norm += grad_norm ** 2
+            total_grad_norm = total_grad_norm ** 0.5
+            print(f"  Total gradient norm: {total_grad_norm:.2f}")
+            torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            print(f"  ✅ Gradient update applied with proper KL regularization")
+            _t_loss = time.time() - _t_loss0
+            print(f"[timing] loss_update: {_t_loss:.2f}s")
 
             # Beta warmup + optional adaptation
             if step_idx <= beta_warmup_steps:
@@ -835,13 +839,20 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
 
             # Post-update eval
             print(f"\n{'='*20} PHASE 9: POST-UPDATE PERFORMANCE (step {step_idx}) {'='*20}")
+            _t_post_eval0 = time.time()
             post_performance = test_model_performance(training_model, f"POST-UPDATE (step {step_idx})")
+            _t_post_eval = time.time() - _t_post_eval0
+            print(f"[timing] post_eval: {_t_post_eval:.2f}s")
             perf_delta = post_performance - last_post_performance
             last_post_performance = post_performance
             print(f"\n{'='*20} PHASE 10: ANALYSIS (step {step_idx}) {'='*20}")
+            _t_analysis0 = time.time()
             print(f"🔍 GRPO Step Impact (step {step_idx}):")
             print(f"  Post-update performance: {post_performance:.4f}")
             print(f"  Step performance change: {perf_delta:+.4f}")
+            _t_analysis = time.time() - _t_analysis0
+            _step_secs = time.time() - _step_t0
+            print(f"\n⏱️ Timing (step {step_idx}): generation={_t_generation:.2f}s, rewards={_t_rewards:.2f}s, advantages={_t_adv:.2f}s, loss_update={_t_loss:.2f}s, post_eval={_t_post_eval:.2f}s, analysis={_t_analysis:.2f}s, total={_step_secs:.2f}s")
 
             # Checkpoint
             if checkpoint_every and (step_idx % checkpoint_every == 0):
@@ -855,9 +866,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             # Store per-step metrics (overview)
             pre_val = float(post_performance - perf_delta)
             gradn = float(total_grad_norm) if 'total_grad_norm' in locals() else None
-            _pg_val = avg_pg_loss.detach().item() if torch.is_tensor(avg_pg_loss) else float(avg_pg_loss)
-            _kl_val = avg_kl_loss.detach().item() if torch.is_tensor(avg_kl_loss) else float(avg_kl_loss)
-            _kl_ratio_val = float(kl_ratio.detach().item() if torch.is_tensor(kl_ratio) else kl_ratio)
+            _pg_val = float(avg_pg_loss_val)
+            _kl_val = float(avg_kl_loss_val)
+            _kl_ratio_val = float(kl_ratio)
 
             step_metrics.append({
                 'step': int(step_idx),
@@ -870,15 +881,16 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 'adv': step_adv_metric,
                 'grad_norm': gradn,
                 'beta': float(beta),
+                'sec': float(_step_secs),
             })
 
     return {
         'initial_performance': initial_performance,
         'post_performance': last_post_performance,
         'performance_change': last_post_performance - initial_performance,
-        'total_loss': total_loss.item() if hasattr(total_loss, 'item') else total_loss,
-        'pg_loss': avg_pg_loss,
-        'kl_penalty': avg_kl_loss,
+        'total_loss': total_loss_val,
+        'pg_loss': avg_pg_loss_val,
+        'kl_penalty': avg_kl_loss_val,
         'step_metrics': step_metrics
     }
 
@@ -893,6 +905,7 @@ def main():
     parser.add_argument("--checkpoint_every", type=int, default=0)
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch_size", type=int, default=4)
     args = parser.parse_args()
 
     try:
@@ -910,6 +923,7 @@ def main():
             checkpoint_every=args.checkpoint_every,
             overfit_single_batch=args.overfit_single_batch,
             seed=args.seed,
+            batch_size=args.batch_size,
         )
         
         print(f"\n🎯 FINAL SUMMARY:")
@@ -922,12 +936,13 @@ def main():
         if args.steps > 1 and 'step_metrics' in results:
             rows = results['step_metrics']
             print("\n📋 Per-step overview:")
-            header = f"{'Step':>4} | {'Pre':>6} | {'Post':>6} | {'Δ':>6} | {'PG':>7} | {'KL':>7} | {'KL%':>5} | {'Adv':>6} | {'GradN':>6} | {'β':>5}"
+            header = f"{'Step':>4} | {'Pre':>6} | {'Post':>6} | {'Δ':>6} | {'PG':>7} | {'KL':>7} | {'KL%':>5} | {'Adv':>6} | {'GradN':>6} | {'β':>5} | {'Sec':>6}"
             print(header)
             print('-' * len(header))
             for r in rows:
                 gradn = f"{r['grad_norm']:.2f}" if r['grad_norm'] is not None else "-"
-                print(f"{r['step']:>4} | {r['pre']:>6.3f} | {r['post']:>6.3f} | {r['delta']:>6.3f} | {r['pg']:>7.3f} | {r['kl']:>7.3f} | {r['kl_ratio']:>5.1f} | {r['adv']:>6.3f} | {gradn:>6} | {r['beta']:>5.3f}")
+                secs = f"{r.get('sec', 0.0):.2f}"
+                print(f"{r['step']:>4} | {r['pre']:>6.3f} | {r['post']:>6.3f} | {r['delta']:>6.3f} | {r['pg']:>7.3f} | {r['kl']:>7.3f} | {r['kl_ratio']:>5.1f} | {r['adv']:>6.3f} | {gradn:>6} | {r['beta']:>5.3f} | {secs:>6}")
         
     except Exception as e:
         print(f"❌ Error in manual GRPO analysis: {e}")
