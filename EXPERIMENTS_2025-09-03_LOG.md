@@ -4,7 +4,7 @@
 - Objective: Stabilize overfit‑one‑batch learning and quantify whether larger effective batch is required for steady reward gains.
 - Result: Training dynamics remain stable with r4 settings (true KL, low β, modest entropy), showing repeated peaks but modest net gains in 50‑step runs. A 500‑step remote run confirms no KL runaway, but progress is incremental as expected for chess. Local capacity indicates bs16 fits; bs32 OOMs under the current single‑backward scheme.
 
-## Findings Since 2025‑09‑02
+## Findings Since 2025-09-02
 - Overfit (r4) 50‑step local runs:
   - β warmup 20 steps → β_after_warmup=0.005
   - True token‑level KL(p||q), entropy=0.005, gens=12
@@ -14,7 +14,8 @@
   - KL≈0.055 post‑warmup; KL% within 15–60% most steps; grads stable.
 - Capacity & batch size:
   - Manual debug accumulates all completion graphs until a single backward → peak activation memory scales with batch_size × num_generations × seq_len.
-  - Locally: bs16 "barely fits"; bs32 OOMs around sample ~31 (consistent with single‑backward accumulation).
+  - Important clarification: the earlier bs=32 OOM was observed BEFORE introducing gradient accumulation; with GA enabled, a later bs=32 probe did NOT OOM (details in Update below).
+  - Locally (pre-GA): bs16 "barely fits"; bs32 OOMs around sample ~31 (consistent with single-backward accumulation).
 
 ## Conclusions
 - Current r4 settings produce healthy training dynamics (KL controlled, stable grads, periodic reward upticks) but do not guarantee monotonic gains over 50 steps — expected for this task and setup.
@@ -56,7 +57,7 @@
 
 
 ## Update (late Sept 3)
-- Capacity vs. utilization: Two-step bs=32 run shows low VRAM (~3 GB of 12 GB) and high compute utilization (>90%), but throughput is not the goal right now. We could leverage higher VRAM via chunked grad accumulation to speed iteration, but we will keep complexity low for now.
+- Capacity vs. utilization (WITH GA enabled): Two-step bs=32 run shows low VRAM (~3 GB of 12 GB) and high compute utilization (>90%), but throughput is not the goal right now. We could leverage higher VRAM via chunked grad accumulation to speed iteration, but we will keep complexity low for now.
 - Effect of larger batch: Increasing batch size to 32 did not materially change training dynamics (reward slope/stability) yet significantly slows experiment iteration. Decision: continue with lower batch size for local iterations.
 - Next focus: Increase num_generations (within-prompt) to reduce variance where GRPO signal lives.
   - Suggested equal-compute probes on the same fixed batch:
