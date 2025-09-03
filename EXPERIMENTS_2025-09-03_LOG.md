@@ -84,9 +84,9 @@
 
 ## High-Gens Follow-up (Sept 3, later)
 - Runs on the same dev machine with per-sample backward (low peak VRAM), bs=8, GA=1, overfit_single_batch=True.
-- 20 steps, gens=16 → Final 0.4108 (+0.0059). Typical step time ≈26–28s.
-- 20 steps, gens=24 → Final 0.4529 (+0.0479). Typical step time ≈33–34s.
-- Longer run (latest full log, bs=8, gens=24):
+- 20 steps, gens=16 → Final 0.4108 (+0.0059). Typical step time ≈26–28s. Full log: logs/manual_grpo_debug_run-250903-141055.log
+- 20 steps, gens=24 → Final 0.4529 (+0.0479). Typical step time ≈33–34s. Full log: logs/manual_grpo_debug_run-250903-142047.log
+- Longer run (latest full log, bs=8, gens=24): Full log: logs/manual_grpo_debug_run-250903-151059.log
   - StartPost=0.4310 → EndPost=0.4010 (Δ −0.0300) over ~30 steps; PosSteps=16, NegSteps=14.
   - MA10: 0.4236 → 0.4101 (Δ −0.0135); BestPost=0.4550@step6; WorstPost=0.3490@step23.
   - Timing: Avg step ≈33.7s; Last step ≈33.3s.
