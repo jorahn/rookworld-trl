@@ -23,6 +23,10 @@ import numpy as np
 import random
 import argparse
 import time
+import math
+import logging
+import os
+from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from src.rookworld_trl.rewards import create_reward_function
 from src.rookworld_trl.dataset import RookWorldDataGenerator
@@ -43,7 +47,19 @@ def generate_eval(model, **kwargs):
         model.train()
     return outputs
 
-def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl: float = 0.5, checkpoint_every: int = 0, overfit_single_batch: bool = False, seed: int = 42, batch_size: int = 4):
+def manual_grpo_single_batch(
+    steps: int = 1,
+    beta_adapt: bool = False,
+    target_kl: float = 0.5,
+    checkpoint_every: int = 0,
+    overfit_single_batch: bool = False,
+    seed: int = 42,
+    batch_size: int = 4,
+    num_generations: int = 12,
+    grad_accum_steps: int = 1,
+    beta_warmup_steps: int = 20,
+    entropy_coef: float = 0.005,
+):
     """
     Manually implement GRPO for a single batch with extensive logging
     """
@@ -52,11 +68,9 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print("=" * 70)
     
     # Configuration tuned for overfitting a single batch
-    num_generations = 12
     max_new_tokens = 128
     learning_rate = 2e-6
     # Beta schedule
-    beta_warmup_steps = 20
     beta_after_warmup = 0.005
     beta = 0.0
     # Task-conditional sampling
@@ -64,8 +78,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     p_top_p = 0.95
     a_temperature = 1.0
     a_top_p = 0.98
-    # Entropy bonus
-    entropy_coef = 0.005
+    # Entropy bonus (configurable)
     
     # TRL optimizer defaults
     adam_beta1 = 0.9
@@ -80,6 +93,16 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     print(f"  Beta (KL penalty): {beta} (warmup → {beta_after_warmup} after {beta_warmup_steps} steps)")
     print(f"  KL: token-level KL(p||q) over generated tokens; Adv clip=±2.0; Entropy coef={entropy_coef}")
     print(f"  Steps: {steps} (sequential GRPO updates)")
+    # Gradient accumulation / micro-updates per batch
+    total_samples = batch_size * num_generations
+    if grad_accum_steps < 1:
+        print(f"  ⚠️ Invalid --grad_accum_steps={grad_accum_steps}; resetting to 1")
+        grad_accum_steps = 1
+    if grad_accum_steps > total_samples:
+        print(f"  ⚠️ --grad_accum_steps ({grad_accum_steps}) > total_samples ({total_samples}); capping to {total_samples}")
+        grad_accum_steps = total_samples
+    microbatch_size = math.ceil(total_samples / grad_accum_steps)
+    print(f"  GA (micro-updates per batch): {grad_accum_steps} → microbatch_size={microbatch_size}, effective_batch={total_samples}")
     if beta_adapt:
         print(f"  Beta adaptation: ON (target_KL≈{target_kl})")
     if overfit_single_batch:
@@ -450,7 +473,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     total_kl_loss = 0.0
     scale = 1.0 / (batch_size * num_generations)
     print(f"🔄 Computing GRPO loss with proper token-level KL and accumulating grads...")
-    
+    processed = 0
+    steps_done = 0
     for i, (prompt, completions, advantages) in enumerate(zip(prompts, all_completions, all_advantages)):
         print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
         normalized_prompt = normalize_spacing(prompt)
@@ -494,6 +518,20 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 prompt_kl_loss += kl_v
                 print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
                 print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
+                processed += 1
+                if (processed % microbatch_size == 0) or (processed == (batch_size * num_generations)):
+                    # Perform a micro-update
+                    total_grad_norm = 0.0
+                    for name, param in training_model.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = param.grad.data.norm(2).item()
+                            total_grad_norm += grad_norm ** 2
+                    total_grad_norm = total_grad_norm ** 0.5
+                    print(f"    ⛳ Micro-update {steps_done+1}/{grad_accum_steps}: grad_norm={total_grad_norm:.2f}")
+                    torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    steps_done += 1
             else:
                 print(f"  Gen {j+1}: Empty completion - skipping")
         avg_prompt_pg = prompt_pg_loss / num_generations
@@ -514,18 +552,19 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
     kl_ratio = abs(avg_kl_loss_val) / (abs(avg_pg_loss_val) + abs(avg_kl_loss_val) + 1e-8) * 100
     print(f"  KL penalty ratio: {kl_ratio:.1f}%")
     
-    # Optimizer step
-    print(f"\n🔄 Performing gradient update...")
-    total_grad_norm = 0.0
-    for name, param in training_model.named_parameters():
-        if param.grad is not None:
-            grad_norm = param.grad.data.norm(2).item()
-            total_grad_norm += grad_norm ** 2
-    total_grad_norm = total_grad_norm ** 0.5
-    print(f"  Total gradient norm: {total_grad_norm:.2f}")
-    torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
+    # If no micro-updates were performed (e.g., empty completions), ensure one update
+    if steps_done == 0:
+        print(f"\n🔄 Performing gradient update...")
+        total_grad_norm = 0.0
+        for name, param in training_model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.data.norm(2).item()
+                total_grad_norm += grad_norm ** 2
+        total_grad_norm = total_grad_norm ** 0.5
+        print(f"  Total gradient norm: {total_grad_norm:.2f}")
+        torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
     _t_loss = time.time() - _t_loss0
     print(f"[timing] loss_update: {_t_loss:.2f}s")
     print(f"  ✅ Gradient update applied with proper KL regularization")
@@ -744,6 +783,8 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             total_pg_loss = 0.0
             total_kl_loss = 0.0
             scale = 1.0 / (batch_size * num_generations)
+            processed = 0
+            steps_done = 0
             print(f"🔄 Computing GRPO loss with proper token-level KL and accumulating grads...")
             for i, (prompt, completions, advantages) in enumerate(zip(prompts, all_completions, all_advantages)):
                 print(f"\n🎯 Prompt {i+1} - Corrected GRPO Loss:")
@@ -789,6 +830,19 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                         prompt_kl_loss += kl_v
                         print(f"  Gen {j+1}: A={advantage:+.3f}, logp/len={float(seq_logprob.detach().item()):.3f}, kl={float(seq_kl.detach().item()):.3f}, H={float(tok_entropy.detach().item()):.3f}")
                         print(f"         PG={pg_v:.3f}, KL_penalty={kl_v:.3f}, EntReg={ent_v:.3f}, total={(pg_v+kl_v+ent_v):.3f}")
+                        processed += 1
+                        if (processed % microbatch_size == 0) or (processed == (batch_size * num_generations)):
+                            total_grad_norm = 0.0
+                            for name, param in training_model.named_parameters():
+                                if param.grad is not None:
+                                    grad_norm = param.grad.data.norm(2).item()
+                                    total_grad_norm += grad_norm ** 2
+                            total_grad_norm = total_grad_norm ** 0.5
+                            print(f"    ⛳ Micro-update {steps_done+1}/{grad_accum_steps}: grad_norm={total_grad_norm:.2f}")
+                            torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+                            optimizer.step()
+                            optimizer.zero_grad(set_to_none=True)
+                            steps_done += 1
                     else:
                         print(f"  Gen {j+1}: Empty completion - skipping")
                 avg_prompt_pg = prompt_pg_loss / num_generations
@@ -805,18 +859,19 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
             print(f"  Total Loss:          ={total_loss_val:8.3f}")
             kl_ratio = abs(avg_kl_loss_val) / (abs(avg_pg_loss_val) + abs(avg_kl_loss_val) + 1e-8) * 100
             print(f"  KL penalty ratio: {kl_ratio:.1f}%")
-            print(f"\n🔄 Performing gradient update (step {step_idx})...")
-            total_grad_norm = 0.0
-            for name, param in training_model.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.data.norm(2).item()
-                    total_grad_norm += grad_norm ** 2
-            total_grad_norm = total_grad_norm ** 0.5
-            print(f"  Total gradient norm: {total_grad_norm:.2f}")
-            torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            print(f"  ✅ Gradient update applied with proper KL regularization")
+            if steps_done == 0:
+                print(f"\n🔄 Performing gradient update (step {step_idx})...")
+                total_grad_norm = 0.0
+                for name, param in training_model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.data.norm(2).item()
+                        total_grad_norm += grad_norm ** 2
+                total_grad_norm = total_grad_norm ** 0.5
+                print(f"  Total gradient norm: {total_grad_norm:.2f}")
+                torch.nn.utils.clip_grad_norm_(training_model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                print(f"  ✅ Gradient update applied with proper KL regularization")
             _t_loss = time.time() - _t_loss0
             print(f"[timing] loss_update: {_t_loss:.2f}s")
 
@@ -828,7 +883,7 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
                 if beta < beta_after_warmup:
                     beta = beta_after_warmup
                 if beta_adapt:
-                    kl_mag = float(abs(avg_kl_loss))
+                    kl_mag = float(abs(avg_kl_loss_val))
                     if kl_mag > target_kl * 1.05:
                         beta = beta * 1.1
                     elif kl_mag < target_kl * 0.95:
@@ -891,12 +946,49 @@ def manual_grpo_single_batch(steps: int = 1, beta_adapt: bool = False, target_kl
         'total_loss': total_loss_val,
         'pg_loss': avg_pg_loss_val,
         'kl_penalty': avg_kl_loss_val,
-        'step_metrics': step_metrics
+        'step_metrics': step_metrics,
+        # metadata for logging
+        'batch_size': batch_size,
+        'num_generations': num_generations,
+        'grad_accum_steps': grad_accum_steps,
+        'effective_batch': batch_size * num_generations,
+        'microbatch_size': microbatch_size,
     }
 
 def main():
+    # Configure logging: stream to stdout and write full log to logs/
+    os.makedirs('logs', exist_ok=True)
+    ts = datetime.now().strftime('%y%m%d-%H%M%S')
+    logfile = f"logs/manual_grpo_debug_run-{ts}.log"
+
+    logger = logging.getLogger('manual_grpo')
+    logger.setLevel(logging.INFO)
+    # Avoid duplicate handlers if main() somehow re-enters
+    if not logger.handlers:
+        sh = logging.StreamHandler()
+        fh = logging.FileHandler(logfile, encoding='utf-8')
+        formatter = logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S')
+        sh.setFormatter(formatter)
+        fh.setFormatter(formatter)
+        logger.addHandler(sh)
+        logger.addHandler(fh)
+
+    # Redirect print to logger.info for full capture
+    import builtins as _builtins
+    _orig_print = _builtins.print
+
+    def _print(*args, sep=' ', end='\n', **kwargs):
+        try:
+            msg = sep.join(str(a) for a in args)
+        except Exception:
+            msg = ' '.join(map(str, args))
+        logger.info(msg)
+
+    _builtins.print = _print
+
     print("🚨 DEBUGGING GRPO TRAINING - STEP BY STEP")
     print("=" * 70)
+    print(f"Full log: {logfile}")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50)
@@ -905,7 +997,11 @@ def main():
     parser.add_argument("--checkpoint_every", type=int, default=0)
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=4, help="prompts per microbatch")
+    parser.add_argument("--num_generations", "--gens", type=int, default=12, help="completions per prompt (GRPO group size)")
+    parser.add_argument("--grad_accum_steps", "--ga", type=int, default=1, help="number of microbatches to process within a batch (manual debug splits flattened samples into this many chunks; steps per chunk)")
+    parser.add_argument("--beta_warmup_steps", type=int, default=20, help="warmup steps with beta=0 before switching to beta_after_warmup")
+    parser.add_argument("--entropy_coef", type=float, default=0.005, help="entropy regularization coefficient")
     args = parser.parse_args()
 
     try:
@@ -924,6 +1020,10 @@ def main():
             overfit_single_batch=args.overfit_single_batch,
             seed=args.seed,
             batch_size=args.batch_size,
+            num_generations=args.num_generations,
+            grad_accum_steps=args.grad_accum_steps,
+            beta_warmup_steps=args.beta_warmup_steps,
+            entropy_coef=args.entropy_coef,
         )
         
         print(f"\n🎯 FINAL SUMMARY:")
@@ -932,17 +1032,19 @@ def main():
         print(f"  Performance change: {results['performance_change']:+.4f}")
         print(f"  Total loss: {results['total_loss']:.2f}")
         
-        # Overview table per step (when multiple steps requested)
-        if args.steps > 1 and 'step_metrics' in results:
-            rows = results['step_metrics']
+        # Overview table per step (always, if metrics available)
+        rows = results.get('step_metrics', [])
+        header = f"{'Step':>4} | {'Pre':>6} | {'Post':>6} | {'Δ':>6} | {'PG':>7} | {'KL':>7} | {'KL%':>5} | {'Adv':>6} | {'GradN':>6} | {'β':>5} | {'Sec':>6}"
+        if rows:
             print("\n📋 Per-step overview:")
-            header = f"{'Step':>4} | {'Pre':>6} | {'Post':>6} | {'Δ':>6} | {'PG':>7} | {'KL':>7} | {'KL%':>5} | {'Adv':>6} | {'GradN':>6} | {'β':>5} | {'Sec':>6}"
             print(header)
             print('-' * len(header))
             for r in rows:
                 gradn = f"{r['grad_norm']:.2f}" if r['grad_norm'] is not None else "-"
                 secs = f"{r.get('sec', 0.0):.2f}"
                 print(f"{r['step']:>4} | {r['pre']:>6.3f} | {r['post']:>6.3f} | {r['delta']:>6.3f} | {r['pg']:>7.3f} | {r['kl']:>7.3f} | {r['kl_ratio']:>5.1f} | {r['adv']:>6.3f} | {gradn:>6} | {r['beta']:>5.3f} | {secs:>6}")
+
+        # No separate summary file: full console output is mirrored to logs/manual_grpo_debug_run-*.log
         
     except Exception as e:
         print(f"❌ Error in manual GRPO analysis: {e}")

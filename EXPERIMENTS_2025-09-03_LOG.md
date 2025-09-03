@@ -65,3 +65,29 @@
     - A2: current baseline (e.g., bs=16, gens=12)
   - Keep r5 params: true KL, warmup 20 → β=0.005, entropy 0.005, LR 2e-6, greedy eval, P-only batch.
 - Timing: Phase timings are now logged (r5); use them to monitor where time is spent.
+
+## 2-step GA Comparison (Sept 3)
+- Setup: steps=2, overfit_single_batch, batch_size=4 (prompts per microbatch), num_generations=12 (completions per prompt), same fixed P-only batch.
+- Naming clarification (manual debug):
+  - batch_size: prompts per microbatch; gens: per-prompt completions (group size); ga: number of within-batch chunks to process (manual debug splits flattened samples into ga chunks and steps each chunk).
+  - Note: This manual-debug GA is not “true GA” (accumulate then single step). See README “Manual Debug vs. Trainer Hparams (Temporary)”.
+
+- Results (final avg reward, performance delta, step-2 total time):
+  - GA=1 (single update after full batch; microbatch_size=48): 0.3960, +0.0018, ~12.26s
+  - GA=48 (per-sample micro-update; microbatch_size=1): 0.3962, +0.0020, ~13.61s
+  - GA=4 (minibatches; microbatch_size=12): 0.3900, −0.0042, ~12.65s
+
+- Takeaways:
+  - Over only 2 steps, behavior is similar across GA settings; GA>1 adds small overhead from more frequent step/zero/clip.
+  - For fast local iteration, keep GA=1 by default; increase GA when memory headroom is tight or when probing different update cadences.
+  - Groups (gens) remain orthogonal: they affect advantage computation, not the update cadence.
+
+## High-Gens Follow-up (Sept 3, later)
+- Runs on the same dev machine with per-sample backward (low peak VRAM), bs=8, GA=1, overfit_single_batch=True.
+- 20 steps, gens=16 → Final 0.4108 (+0.0059). Typical step time ≈26–28s.
+- 20 steps, gens=24 → Final 0.4529 (+0.0479). Typical step time ≈33–34s.
+- Longer run (latest full log, bs=8, gens=24):
+  - StartPost=0.4310 → EndPost=0.4010 (Δ −0.0300) over ~30 steps; PosSteps=16, NegSteps=14.
+  - MA10: 0.4236 → 0.4101 (Δ −0.0135); BestPost=0.4550@step6; WorstPost=0.3490@step23.
+  - Timing: Avg step ≈33.7s; Last step ≈33.3s.
+- Interpretation: Higher gens shows promise (clear gain at 20 steps), but over ~30 steps the curve oscillates. Next probes: more steps at gens=24 or bump to gens=32 with a shorter warmup and slightly lower entropy to stabilize later steps.

@@ -218,6 +218,16 @@ uv run rookworld-train --temperature 0.5 --top_p 0.9
 - Consider lower batch size if memory constrained
 
 **For researching GRPO training dynamics:**
+
+## Manual Debug vs. Trainer Hparams (Temporary)
+
+The manual debug script (`manual_grpo_debug.py`) uses the following intuitive, group‑agnostic hparam names:
+
+- `--batch_size`: prompts per microbatch.
+- `--num_generations/--gens`: completions per prompt (GRPO group size).
+- `--grad_accum_steps/--ga`: number of chunks the manual debug splits the flattened (prompt × generation) samples into within a batch; it applies an optimizer step per chunk. This is optimized for fast, memory‑lean local iteration and is NOT “true GA” in the HuggingFace trainer sense.
+
+Note: This semantics is currently inconsistent with `example.py` and the main training package (`src/rookworld_trl/train.py`), where GA and batch sizing follow standard trainer conventions. We’ll converge these in a future cleanup; for now, the manual debug script prioritizes clarity and hackability for single‑batch overfit investigations.
 ```bash
 # Step-by-step manual GRPO analysis (experimental debugging)
 uv run python manual_grpo_debug.py
