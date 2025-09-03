@@ -17,6 +17,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `uv run rookworld-inspect --batch_size 4` - Inspect reward function behavior
 - `uv run python manual_grpo_debug.py --seed 42` - Step-by-step GRPO debugging
 - `uv run python manual_grpo_debug.py --overfit_single_batch` - Diagnostic overfit mode
+- Manual debug flags of interest:
+  - `--gens/--num_generations <int>`: completions per prompt (GRPO group size)
+  - `--ga/--grad_accum_steps <int>`: number of within-batch chunks processed (default 1)
+  - `--beta_warmup_steps <int>`: warmup steps with beta=0 (default 20)
+  - `--entropy_coef <float>`: entropy regularization (default 0.005)
+  - Full run logs are written to `logs/manual_grpo_debug_run-<YYMMDD-HHMMSS>.log` and streamed to stdout
 
 ### Development Tools
 - `black src/` - Code formatting

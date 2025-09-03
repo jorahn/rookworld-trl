@@ -48,3 +48,4 @@
 - Training knobs via env in `train.sh`: `MODEL_NAME`, `OUTPUT_DIR`, `BATCH_SIZE`, `LEARNING_RATE`, `BETA`, `WARMUP_STEPS`.
 - Task-conditional sampling (train.sh): set `TASK_CONDITIONAL_GEN=true` and provide per-task params `P_TEMPERATURE`, `P_TOP_P`, `A_TEMPERATURE`, `A_TOP_P`.
 - Normalize spacing before scoring/generation to avoid KL inflation (see `utils.normalize_spacing`).
+ - Logs: `logs/` is ignored by default; only curated full-run logs may be force-added for reproducibility and are referenced from experiments logs.
