@@ -23,6 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `--beta_warmup_steps <int>`: warmup steps with beta=0 (default 20)
   - `--entropy_coef <float>`: entropy regularization (default 0.005)
   - Full run logs are written to `logs/manual_grpo_debug_run-<YYMMDD-HHMMSS>.log` and streamed to stdout
+  - Important: Do not reduce `max_new_tokens` — the reward schema depends on this length budget; changing it breaks evaluation comparability.
 
 ### Development Tools
 - `black src/` - Code formatting

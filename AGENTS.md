@@ -48,4 +48,5 @@
 - Training knobs via env in `train.sh`: `MODEL_NAME`, `OUTPUT_DIR`, `BATCH_SIZE`, `LEARNING_RATE`, `BETA`, `WARMUP_STEPS`.
 - Task-conditional sampling (train.sh): set `TASK_CONDITIONAL_GEN=true` and provide per-task params `P_TEMPERATURE`, `P_TOP_P`, `A_TEMPERATURE`, `A_TOP_P`.
 - Normalize spacing before scoring/generation to avoid KL inflation (see `utils.normalize_spacing`).
+ - Do not reduce `max_new_tokens` in manual debug or training runs: the reward schema expects this sequence budget and altering it breaks comparability and evaluation assumptions.
  - Logs: `logs/` is ignored by default; only curated full-run logs may be force-added for reproducibility and are referenced from experiments logs.
