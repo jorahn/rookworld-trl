@@ -50,6 +50,18 @@ uv run python manual_grpo_debug.py \
   - Optionally test warmup=10 vs 5 to see if slightly later KL improves the mid‑run slope; keep β small.
   - Consider adaptive β to maintain a KL band if oscillations return in longer runs (500 steps).
 
+## Run 2 — 300×40 (remote, seed 43)
+- Full log: logs/manual_grpo_debug_run-250904-155312.log
+- Config: bs=8, gens=40, steps=300, GA=1, warmup=5, entropy=0.002, seed=43
+- Reward (greedy, P‑only batch):
+  - StartPost=0.4120 → EndPost=0.4580 (Δ +0.0460)
+  - MA20: 0.4004 → 0.4129 (Δ +0.0125)
+  - PosSteps=147, NegSteps=148; BestPost=0.4660; WorstPost=0.3340
+- Timing: Avg step ≈15.2s; Last step ≈14.8s
+
+### Read
+- This run shows a clear positive MA20 slope and a sizeable net gain over 300 steps, strengthening evidence that higher gens with early KL and low entropy produces steady improvement on the overfit batch. Proceed to a third seed or extend to 500 steps to confirm durability.
+
 ## Next (if needed)
 - If 300×40 remains oscillatory with weak net gains:
   - Keep gens=40, increase horizon to 500 steps OR
