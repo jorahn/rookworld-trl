@@ -33,11 +33,25 @@ uv run python manual_grpo_debug.py \
   - Positive MA20 slope through the mid and late windows; net Δ ≥ +0.05 over 300 steps
   - KL engaged after step 5 with small β; entropy low but non‑zero for healthy variance
   - Grad norms stable; no KL dominance post‑warmup
-- Full log: (to be attached) — pending remote upload
+- Full log: logs/manual_grpo_debug_run-250904-061520.log
+
+### Result Summary
+- Config: bs=8, gens=40, steps=300, GA=1, warmup=5, entropy=0.002, seed=42
+- Reward (greedy, P‑only batch):
+  - StartPost=0.2830 → EndPost=0.2910 (Δ +0.0080)
+  - MA20: 0.2876 → 0.2953 (Δ +0.0078)
+  - PosSteps=141, NegSteps=151; BestPost=0.3380 @ step 627215; WorstPost=0.2200 @ step 627187
+- Timing: Avg step ≈15.1s; Last step ≈15.1s
+
+### Read & Next
+- MA20 slope is positive with a small net gain over 300 steps — better than earlier 100×32 (which showed MA20 decline). This supports the “more gens + longer horizon” lever to overcome variance.
+- Next:
+  - Replicate with a second seed to confirm trend stability.
+  - Optionally test warmup=10 vs 5 to see if slightly later KL improves the mid‑run slope; keep β small.
+  - Consider adaptive β to maintain a KL band if oscillations return in longer runs (500 steps).
 
 ## Next (if needed)
 - If 300×40 remains oscillatory with weak net gains:
   - Keep gens=40, increase horizon to 500 steps OR
   - Introduce gentle adaptive β to maintain a KL band while preserving small average β
 - If 300×40 shows clean improvement: replicate on a second seed and proceed to trainer‑level sweep.
-
