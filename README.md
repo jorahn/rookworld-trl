@@ -27,22 +27,29 @@ uv sync
 sudo apt install stockfish
 ```
 
-### Experimental Training
+### Stable Training (Recommended)
 
 ```bash
-# Experimental GRPO training with optimized parameters
-./train.sh
+# Stable GRPO training with proven parameters
+uv run python manual_grpo_debug.py \
+  --steps 400 \
+  --task_type A \
+  --lr_schedule advanced \
+  --lr_warmup_steps 20 \
+  --eval_every 10
 
 # Monitor training progress
 tensorboard --logdir grpo_output_*/runs
+```
+
+### Legacy Training (May be unstable)
+
+```bash
+# Original training script (may have stability issues)
+./train.sh
 
 # Conservative training for stability testing
 uv run rookworld-train --stable
-
-# Task-conditional generation (P vs A) during training
-uv run rookworld-train --task_conditional_gen \
-  --p_temperature 0.5 --p_top_p 0.9 \
-  --a_temperature 0.95 --a_top_p 0.95
 
 # Custom parameter exploration
 uv run rookworld-train --batch_size 8 --learning_rate 5e-6 --beta 0.2

@@ -34,6 +34,7 @@ from src.rookworld_trl.rewards import create_reward_function
 from src.rookworld_trl.dataset import RookWorldDataGenerator
 from src.rookworld_trl.utils import normalize_spacing
 import copy
+from typing import Optional
 
 # Set deterministic behavior (seed set in main)
 torch.backends.cudnn.deterministic = True
@@ -49,7 +50,14 @@ def generate_eval(model, **kwargs):
         model.train()
     return outputs
 
-def evaluate_on_eval_set(model, tokenizer, eval_file="opening_dataset_eval.json", max_samples=50):
+def evaluate_on_eval_set(
+    model,
+    tokenizer,
+    eval_file="opening_dataset_eval.json",
+    max_samples=50,
+    dump_dir: Optional[str] = None,
+    eval_step: Optional[int] = None,
+):
     """Evaluate model on held-out eval set and return accuracy."""
     import json
 
@@ -60,15 +68,26 @@ def evaluate_on_eval_set(model, tokenizer, eval_file="opening_dataset_eval.json"
         print(f"  ⚠️ Eval file {eval_file} not found, skipping evaluation")
         return None
 
-    # Sample subset for speed
+    # Take first N samples for consistent evaluation
     if max_samples and max_samples < len(eval_data):
-        import random
-        eval_data = random.sample(eval_data, max_samples)
+        eval_data = eval_data[:max_samples]
 
     exact_matches = 0
     by_move = {}
 
-    for sample in eval_data:
+    def _extract_generated_fen(text: str) -> str:
+        # Normalize spacing and strip task markers
+        norm = normalize_spacing(text)
+        norm = re.sub(r"^\s*[PA]:\s*", "", norm)
+        return norm.split("+")[0].strip()
+
+    def _fen_exact_match(pred: str, exp: str) -> bool:
+        # EXACT match - all fields must match
+        return pred == exp
+
+    eval_records = []
+
+    for sample_idx, sample in enumerate(eval_data):
         prompt = sample["prompt"]
         expected = sample["expected_fen"]
         move_num = sample.get("move_num", 0)
@@ -80,26 +99,50 @@ def evaluate_on_eval_set(model, tokenizer, eval_file="opening_dataset_eval.json"
         # Generate with greedy decoding for consistency
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        with torch.no_grad():
-            outputs = model.generate(
-                inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=100,
-                do_sample=False,  # Greedy
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+        # Use generate_eval to properly handle eval mode
+        outputs = generate_eval(
+            model,
+            input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,
+            max_new_tokens=144,
+            do_sample=False,  # Greedy
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
 
         prompt_len = inputs.input_ids.shape[1]
         completion = tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True)
+        generated_fen = _extract_generated_fen(completion)
 
-        # Extract FEN
-        parts = completion.split("+")
-        if parts and parts[0].strip():
-            generated_fen = parts[0].strip()
-            if generated_fen == expected:
-                exact_matches += 1
-                by_move[move_num]["correct"] += 1
+        is_match = bool(generated_fen) and _fen_exact_match(generated_fen, expected)
+
+        eval_records.append(
+            {
+                "index": sample_idx,
+                "prompt": prompt,
+                "expected_fen": expected,
+                "generated_fen": generated_fen,
+                "raw_completion": completion,
+                "match": is_match,
+                "move_num": move_num,
+            }
+        )
+
+        if is_match:
+            exact_matches += 1
+            by_move[move_num]["correct"] += 1
+
+    if dump_dir and eval_step is not None:
+        from pathlib import Path
+
+        dump_path = Path(dump_dir)
+        dump_path.mkdir(parents=True, exist_ok=True)
+        out_file = dump_path / f"step_{eval_step:03d}.jsonl"
+        with out_file.open("w", encoding="utf-8") as f:
+            for record in eval_records:
+                f.write(json.dumps(record, ensure_ascii=False))
+                f.write("\n")
+        print(f"     ↳ Wrote eval predictions to {out_file}")
 
     accuracy = exact_matches / len(eval_data) * 100
 
@@ -107,7 +150,7 @@ def evaluate_on_eval_set(model, tokenizer, eval_file="opening_dataset_eval.json"
     print(f"  📊 Eval accuracy: {exact_matches}/{len(eval_data)} ({accuracy:.1f}%)")
 
     # Report move 1 specifically if present
-    if 1 in by_move:
+    if 1 in by_move and by_move[1]["total"] > 0:
         move1_acc = by_move[1]["correct"] / by_move[1]["total"] * 100
         print(f"     Move 1: {by_move[1]['correct']}/{by_move[1]['total']} ({move1_acc:.0f}%)")
 
@@ -138,16 +181,38 @@ def save_checkpoint(model, optimizer, step, checkpoint_dir="checkpoints"):
     return checkpoint_path
 
 def get_lr_with_schedule(step, total_steps, base_lr, schedule="constant", warmup_steps=0):
-    """Calculate learning rate based on schedule."""
-    if schedule == "constant":
-        return base_lr
+    """Calculate learning rate based on schedule.
 
-    # Warmup phase
+    For 'advanced' schedule:
+    - Phase 1 (warmup): Linear warmup from 0 to base_lr
+    - Phase 2 (cosine): Cosine decay from base_lr to 5% of base_lr
+    - Phase 3 (linear): Linear annealing from 5% to 0
+    """
+    # Warmup phase applies to ALL schedules
     if step < warmup_steps:
         return base_lr * (step + 1) / warmup_steps
 
     # Post-warmup scheduling
-    if schedule == "cosine":
+    if schedule == "constant":
+        return base_lr
+    elif schedule == "advanced":
+        # Advanced 3-phase schedule: warmup -> cosine to 5% -> linear to 0
+        remaining_steps = total_steps - warmup_steps
+        cosine_steps = int(remaining_steps * 0.7)  # 70% for cosine decay
+        linear_steps = remaining_steps - cosine_steps  # 30% for linear annealing
+
+        step_after_warmup = step - warmup_steps
+
+        if step_after_warmup < cosine_steps:
+            # Phase 2: Cosine decay from base_lr to 5% of base_lr
+            progress = step_after_warmup / cosine_steps
+            min_lr = 0.05 * base_lr
+            return min_lr + (base_lr - min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
+        else:
+            # Phase 3: Linear annealing from 5% to 0
+            progress = (step_after_warmup - cosine_steps) / max(1, linear_steps)
+            return 0.05 * base_lr * (1 - progress)
+    elif schedule == "cosine":
         # Cosine decay from base_lr to 0
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return base_lr * 0.5 * (1 + math.cos(math.pi * progress))
@@ -184,6 +249,7 @@ def manual_grpo_single_batch(
     early_stop_threshold: float = 95.0,
     lr_schedule: str = "constant",
     lr_warmup_steps: int = 0,
+    save_eval_samples: bool = False,
 ):
     """
     Manually implement GRPO for a single batch with extensive logging
@@ -194,7 +260,7 @@ def manual_grpo_single_batch(
     
     # Configuration tuned for overfitting a single batch
     max_new_tokens = 128
-    base_learning_rate = 2e-6
+    base_learning_rate = 1e-7
     learning_rate = base_learning_rate  # Will be adjusted by scheduler
     # Beta schedule
     beta_after_warmup = 0.005
@@ -229,7 +295,13 @@ def manual_grpo_single_batch(
     if eval_every > 0:
         print(f"  Evaluation: Every {eval_every} steps on {eval_file}")
         print(f"  Early stopping: At {early_stop_threshold}% eval accuracy")
-    print(f"  LR schedule: {lr_schedule} (base={base_learning_rate})")
+    print(f"  LR schedule: {lr_schedule} (base={base_learning_rate}, warmup={lr_warmup_steps} steps)")
+
+    eval_dump_dir: Optional[str] = None
+    eval_step_counter = 0
+    if eval_every > 0 and save_eval_samples:
+        eval_dump_dir = os.path.join("logs", "manual_debug_eval_predictions")
+        os.makedirs(eval_dump_dir, exist_ok=True)
     # Gradient accumulation / micro-updates per batch
     total_samples = batch_size * num_generations
     if grad_accum_steps < 1:
@@ -294,8 +366,6 @@ def manual_grpo_single_batch(
     print(f"📊 Loading batch for task type: {task_type}...")
 
     # Check if we should use opening dataset for A: tasks
-    import os
-    import json
     if task_type == "A" and os.path.exists("opening_dataset_train.json"):
         print(f"📂 Loading opening dataset for A: task training...")
         with open("opening_dataset_train.json") as f:
@@ -398,13 +468,19 @@ def manual_grpo_single_batch(
                         if move in board.legal_moves:
                             board.push(move)
                             expected_fen = board.fen()
-                            # Extract predicted FEN from response
-                            parts = completion.split("+")
+                            # Extract predicted FEN from response (normalized)
+                            comp_norm = normalize_spacing(completion)
+                            comp_norm = re.sub(r"^\s*[PA]:\s*", "", comp_norm)
+                            parts = comp_norm.split("+")
                             if parts and parts[0].strip():
                                 predicted_fen = parts[0].strip()
 
-                                # Compare full FENs for exact match
-                                if predicted_fen == expected_fen:
+                                # Compare FENs leniently (ignore move counters)
+                                def _fen_exact_match(pred: str, exp: str) -> bool:
+                                    # EXACT match - all fields must match
+                                    return pred == exp
+
+                                if _fen_exact_match(predicted_fen, expected_fen):
                                     a_task_metrics["exact_match"] += 1
 
                                 # Calculate Levenshtein distance on full FEN
@@ -453,7 +529,24 @@ def manual_grpo_single_batch(
     initial_performance = test_model_performance(training_model, "INITIAL TRAINING MODEL")
     _t_init_eval = time.time() - _t_init_eval0
     print(f"[timing] initial_eval: {_t_init_eval:.2f}s")
-    
+
+    # BASELINE EVALUATION on held-out set before training starts
+    if eval_every > 0:
+        print(f"\n📊 BASELINE: Evaluating on held-out set BEFORE training...")
+        baseline_eval_accuracy = evaluate_on_eval_set(
+            training_model,
+            tokenizer,
+            eval_file,
+            max_samples=50,
+            dump_dir=eval_dump_dir,
+            eval_step=eval_step_counter,
+        )
+        eval_step_counter += 1
+        if baseline_eval_accuracy is not None:
+            print(f"  📌 Baseline eval accuracy: {baseline_eval_accuracy:.1f}%")
+        else:
+            print(f"  ⚠️ Baseline evaluation failed")
+
     # Collect per-step metrics for overview
     step_metrics = []
     
@@ -755,7 +848,7 @@ def manual_grpo_single_batch(
     print(f"  KL penalty ratio: {kl_ratio:.1f}%")
     
     # Update learning rate for step 1
-    current_lr = get_lr_with_schedule(1, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
+    current_lr = get_lr_with_schedule(0, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
     for param_group in optimizer.param_groups:
         param_group['lr'] = current_lr
     if current_lr != base_learning_rate:
@@ -830,7 +923,15 @@ def manual_grpo_single_batch(
     eval_accuracy = None
     if eval_every > 0 and eval_every == 1:
         print(f"\n📊 Evaluating on held-out set...")
-        eval_accuracy = evaluate_on_eval_set(training_model, tokenizer, eval_file, max_samples=50)
+        eval_accuracy = evaluate_on_eval_set(
+            training_model,
+            tokenizer,
+            eval_file,
+            max_samples=50,
+            dump_dir=eval_dump_dir,
+            eval_step=eval_step_counter,
+        )
+        eval_step_counter += 1
 
         if eval_accuracy is not None and eval_accuracy >= early_stop_threshold:
             print(f"\n✅ Early stopping: Eval accuracy {eval_accuracy:.1f}% >= {early_stop_threshold}%")
@@ -1097,12 +1198,12 @@ def manual_grpo_single_batch(
             _t_loss = time.time() - _t_loss0
             print(f"[timing] loss_update: {_t_loss:.2f}s")
 
-            # Update learning rate with schedule
-            current_lr = get_lr_with_schedule(step_idx, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
+            # Update learning rate with schedule (step_idx-1 for 0-based indexing)
+            current_lr = get_lr_with_schedule(step_idx - 1, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
-            if current_lr != base_learning_rate:
-                print(f"  📈 LR schedule: {lr_schedule} → lr={current_lr:.2e} (base={base_learning_rate:.2e})")
+            # Always print LR to track warmup
+            print(f"  📈 LR schedule ({lr_schedule}): step {step_idx}/{steps} → lr={current_lr:.2e} (base={base_learning_rate:.2e})")
 
             # Beta warmup + optional adaptation
             if step_idx <= beta_warmup_steps:
@@ -1142,7 +1243,15 @@ def manual_grpo_single_batch(
             eval_accuracy = None
             if eval_every > 0 and (step_idx % eval_every == 0):
                 print(f"\n📊 Evaluating on held-out set...")
-                eval_accuracy = evaluate_on_eval_set(training_model, tokenizer, eval_file, max_samples=50)
+                eval_accuracy = evaluate_on_eval_set(
+                    training_model,
+                    tokenizer,
+                    eval_file,
+                    max_samples=50,
+                    dump_dir=eval_dump_dir,
+                    eval_step=eval_step_counter,
+                )
+                eval_step_counter += 1
 
                 if eval_accuracy is not None:
                     if eval_accuracy >= early_stop_threshold:
@@ -1250,8 +1359,9 @@ def main():
     parser.add_argument("--eval_every", type=int, default=0, help="Evaluate on held-out set every N steps (0=disabled)")
     parser.add_argument("--eval_file", type=str, default="opening_dataset_eval.json", help="Evaluation dataset file")
     parser.add_argument("--early_stop_threshold", type=float, default=95.0, help="Early stop if eval accuracy >= this")
-    parser.add_argument("--lr_schedule", type=str, default="constant", choices=["constant", "cosine", "linear", "step"], help="Learning rate schedule")
-    parser.add_argument("--lr_warmup_steps", type=int, default=0, help="LR warmup steps for schedules")
+    parser.add_argument("--save_eval_samples", action="store_true", default=False, help="Save detailed eval predictions to JSONL files")
+    parser.add_argument("--lr_schedule", type=str, default="advanced", choices=["constant", "cosine", "linear", "step", "advanced"], help="Learning rate schedule (advanced: warmup->cosine to 5%->linear to 0)")
+    parser.add_argument("--lr_warmup_steps", type=int, default=20, help="LR warmup steps for schedules")
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=4, help="prompts per microbatch")
@@ -1293,6 +1403,7 @@ def main():
             early_stop_threshold=args.early_stop_threshold,
             lr_schedule=args.lr_schedule,
             lr_warmup_steps=args.lr_warmup_steps,
+            save_eval_samples=args.save_eval_samples,
         )
         
         print(f"\n🎯 FINAL SUMMARY:")

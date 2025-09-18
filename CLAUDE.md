@@ -12,11 +12,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `./train.sh` - Main GRPO training script with optimized parameters
 - `uv run rookworld-train` - Direct training with custom arguments
 - `uv run rookworld-train --stable` - Conservative training mode for stability
+- **`uv run python manual_grpo_debug.py --steps 500 --task_type A --lr_schedule advanced`** - Recommended stable training
 
 ### Analysis & Debugging
 - `uv run rookworld-inspect --batch_size 4` - Inspect reward function behavior
 - `uv run python manual_grpo_debug.py --seed 42` - Step-by-step GRPO debugging
 - `uv run python manual_grpo_debug.py --overfit_single_batch` - Diagnostic overfit mode
+- **New stable training parameters** (2025-09-18 update):
+  - `--lr_schedule advanced` - 3-phase LR schedule (warmup → cosine → linear) (default)
+  - `--lr_warmup_steps 20` - Learning rate warmup steps (default, was 0)
+  - `--task_type A|P|mixed` - Focus on environment (A:) or policy (P:) tasks
+  - `--eval_every 10` - Evaluate on held-out set every N steps
+  - `--checkpoint_every -1` - Only checkpoint at end (-1) or every N steps
 - Manual debug flags of interest:
   - `--gens/--num_generations <int>`: completions per prompt (GRPO group size)
   - `--ga/--grad_accum_steps <int>`: number of within-batch chunks processed (default 1)
@@ -52,8 +59,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Key Configuration
 - **Model**: `jrahn/RookWorld-LM-124M` (default base model)
-- **Optimal Parameters**: Batch size 16, LR 1e-6, Beta 0.1, Temperature 0.5
-- **Stability Features**: Gradient clipping (1.0), warmup (100 steps), BF16 precision
+- **Stable Parameters**: Batch size 4, LR 1e-7, Beta 0.005, Advanced LR schedule
+- **Stability Features**: Gradient clipping (1.0), LR warmup (20 steps), Beta warmup (20 steps)
+- **Critical**: Use `generate_eval()` for evaluation to prevent training collapse
 
 ### Dataset Handling
 - **RookWorld Integration**: Loads from HuggingFace hub with preprocessing

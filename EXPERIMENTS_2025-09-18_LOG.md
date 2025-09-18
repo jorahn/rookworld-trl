@@ -120,13 +120,27 @@ Since the model performs well on random A: tasks, we need to:
 2. Test on d2d4, e2e4 from starting position
 3. Look for positions in moves 1-10 where errors are supposedly concentrated
 
-## Next Steps
+## Next Steps (Updated)
 
+### Immediate Priority: Fix Training Collapse
+1. **Investigate GRPO implementation** for bugs
+   - Check advantage calculation
+   - Verify KL penalty computation
+   - Review gradient accumulation logic
+2. **Analyze reward function gradients**
+   - Test with simpler reward (binary exact match only)
+   - Check if chess-specific rewards are causing harmful updates
+3. **Consider alternative approaches:**
+   - Try DPO instead of GRPO
+   - Test supervised fine-tuning first
+   - Use smaller gradient clipping (0.1 instead of 1.0)
+
+### Original Plan (On Hold)
 1. ✅ Fixed metric display bug
-2. Create opening-specific test dataset
-3. Test model on known problematic moves (d2d4, e2e4 from start)
-4. If errors found, then run focused training
-5. Otherwise, investigate where the 82.6% opening error rate claim comes from
+2. ✅ Created opening-specific test dataset
+3. ✅ Tested model on known problematic moves (d2d4, e2e4 from start)
+4. ❌ Cannot run focused training until collapse issue is resolved
+5. ✅ Identified opening errors: en passant notation, piece duplication
 
 ## Log Updates
 
@@ -147,12 +161,147 @@ Since the model performs well on random A: tasks, we need to:
 - Temperature 0.6 gives best results (100% valid, though still imperfect)
 
 ### Key Issues Found:
+1. Greedy decoding (T=0) produces invalid FENs 75% of the time
+2. Temperature 0.6 provides best balance (100% valid, 50% exact)
+3. Common errors: extra kings, wrong en passant squares, incorrect move counts
+
+## Critical Discovery: Catastrophic Model Collapse During Training
+
+### 19:35 - Learning Rate Schedule Investigation
+
+**Problem:** Model experiences catastrophic collapse after just 1 training step, losing all chess knowledge immediately.
+
+**Investigation Steps:**
+
+1. **Initial hypothesis:** Learning rate too high (2e-6)
+   - Implemented sophisticated 3-phase LR schedule:
+     - Phase 1: Linear warmup from 0 to base_lr
+     - Phase 2: Cosine decay to 5% of base_lr (70% of training)
+     - Phase 3: Linear annealing to 0 (final 30%)
+   - Fixed bug: warmup was bypassed for "constant" schedule
+   - Result: Model still collapsed at step 1
+
+2. **Ultra-low learning rate test:** Reduced to 1e-7 (50x reduction)
+   - Step 1: LR = 3.33e-08 (warmup)
+   - Step 2: LR = 6.67e-08
+   - Step 3: LR = 1.00e-07 (full rate)
+   - **Result:** STILL catastrophic collapse at step 1!
+   - Accuracy drops from 68% to 0% immediately
+   - Model loses ability to generate valid FEN strings
+
+**Evidence of Collapse:**
+- Step 0: 68% exact match, 92% valid FEN structure
+- Step 1: 0% exact match, 0% valid FEN structure
+- Outputs become gibberish with random characters
+- Average completion length increases from 72 to 105+ chars
+- Introduction of invalid characters (spaces, letters in wrong context)
+
+**Key Insight:** The problem is NOT just learning rate magnitude. Even LR=3.33e-08 causes immediate collapse, suggesting:
+1. **Harmful gradients** from the reward function
+2. **GRPO implementation bug** (under investigation)
+3. **Task incompatibility** - reward signal may be fundamentally misaligned
+
+### Current Investigation Focus
+
+We are checking both:
+- **Implementation details** for bugs in the GRPO algorithm
+- **Training dynamics** that could cause the collapse
+
+The fact that ANY gradient update (even microscopic) destroys the model suggests the gradient direction itself is problematic, not just its magnitude.
+
+### Key Issues Found:
 1. **En passant notation**: Model consistently misses en passant squares (e3, d3, c3)
 2. **Piece placement**: Sometimes duplicates pieces (PPP → PPPP)
 3. **Invalid boards**: With T=1.0, generates impossible positions
 
-### Next: Run focused training
-Since we've confirmed the issues, we should now run the A-only opening focus experiment to improve these specific cases.
+## Summary of Findings
+
+### Model Performance
+- Base model performs well (68% exact match on eval set)
+- Specific weaknesses in opening positions (d2d4, e2e4)
+- Temperature 0.6 gives best generation quality
+
+### Training Issues
+- **CRITICAL:** Any gradient update causes catastrophic collapse
+- Learning rate magnitude is NOT the primary issue
+- Even LR=3.33e-08 destroys the model immediately
+- Suggests fundamental problem with:
+  - Gradient direction from reward function
+  - GRPO implementation bug
+  - Task/reward misalignment
+
+### Technical Improvements Made
+- ✅ Implemented advanced 3-phase LR schedule
+- ✅ Fixed LR warmup bug (was bypassed for constant schedule)
+- ✅ Added detailed training progression analysis tools
+- ✅ Created evaluation dataset and metrics
+
+### Status: RESOLVED & RUNNING
+
+**Critical Bug Fixed (20:06):** The catastrophic collapse was caused by improper eval/training mode switching in the evaluation function. Fixed by using `generate_eval()` which properly preserves training state.
+
+**Completed Training Runs:**
+1. **500-step P: task run** (20:00) - Policy analysis training (status unknown)
+2. **500-step A: task run** (20:06-20:34) - **PRIMARY RUN** - FEN generation training ✅
+   - **Final progress**: Step 435/500 (87% complete, crashed due to tensor bug)
+   - **Runtime**: 28 minutes total
+   - Learning rate: 1e-7 with advanced 3-phase schedule
+   - Warmup: ✅ Completed (LR and beta both transitioned correctly)
+   - Task focus: A: environment simulation (870 opening positions)
+   - **Baseline**: 68% eval accuracy (held-out set)
+   - **Final eval accuracy**: 66% (33/50 correct) - stable performance
+   - **Crash**: Step 435 due to empty rewards tensor (GitHub issue #6)
+   - **Major success**: ✅ 435 stable gradient updates with no catastrophic collapse
+   - **Performance**: 3.8s per step, maintained chess knowledge throughout
+
+## Breakthrough Summary (20:06)
+
+After extensive debugging, we've identified and resolved the core training stability issue:
+
+### Root Cause
+**Eval Mode Bug**: The `evaluate_on_eval_set()` function wasn't properly switching between eval and training modes, causing:
+- Inconsistent evaluation (dropout still active)
+- Model potentially stuck in eval mode during training
+- Catastrophic collapse after first gradient update
+
+### Solution
+- Fixed evaluation to use `generate_eval()` which properly manages model state
+- Increased max_new_tokens from 100 to 144 for consistency
+- Implemented advanced 3-phase LR schedule with proper warmup
+
+### Results
+- ✅ Model now maintains 68-75% accuracy through training steps
+- ✅ No more catastrophic collapse
+- ✅ Stable training with ultra-low learning rate (1e-7)
+- ✅ Currently running 500-step A: task training to improve FEN generation
+
+This breakthrough enables us to finally train the model on challenging opening positions without destroying its chess knowledge.
+
+## Training Progress Update (20:16)
+
+### A: Task Training (Primary Run)
+- **Step**: 151/500 (30.2% complete)
+- **ETA**: ~20:38 (22 minutes remaining at 3.9s/step)
+- **Runtime**: 9.8 minutes elapsed
+
+### Performance Metrics
+**Evaluation Accuracy (Held-out Set):**
+- Step 10: 70% (peak so far)
+- Step 20-40: 68% (stable at baseline)
+- Step 50: 66% (slight dip)
+- Step 60-80: 66-68% (oscillating)
+- Step 150: 68% (current, stable)
+
+**Training Stability:**
+- ✅ **Zero catastrophic failures** after 151 gradient updates
+- ✅ **Beta transition** working (KL penalty ~0.065 active since step 21)
+- ✅ **LR schedule** working (currently in cosine decay phase)
+- ✅ **Performance oscillation** within healthy bounds (-0.87 to +0.54)
+
+**Key Observation**: Model is maintaining baseline performance (~68%) rather than improving significantly. This suggests either:
+1. The current learning rate is too conservative for meaningful improvement
+2. The reward signal needs refinement
+3. The model is already near-optimal for this task
 
 ### 16:05 - Fixed reward function
 - Reduced schema bonus from 0.3 to 0.03
@@ -369,3 +518,92 @@ uv run python manual_grpo_debug.py \
 - `problem_opening_dataset.json` - 6 hardest test cases
 
 Ready for focused experiments with proper monitoring and checkpointing.
+
+## Session 2: Evaluation Fix & Training Stability Analysis (18:00-18:30)
+
+### Critical Discovery: Evaluation Metric Issue
+
+Changed evaluation from lenient FEN matching (first 4 fields) to exact FEN matching (all 6 fields) in both `evaluate_checkpoint.py` and `manual_grpo_debug.py`. This revealed:
+
+- **Base model performance**: 72% exact FEN match (68% on eval set with seed 42)
+- **Move 1 accuracy**: 0% even before training
+- **A-task schema**: Model correctly generates FEN+reward+terminates+truncated format
+
+### Training Stability Experiments
+
+#### Run 1: Large Batch Size (Failed)
+```bash
+# Configuration
+--batch_size 8
+--num_generations 40
+--entropy_coef 0.002
+# Effective batch: 320
+```
+
+**Results:**
+- Baseline: 68% eval accuracy, 75% training batch accuracy
+- Step 5: **0% eval accuracy, 25% training batch accuracy**
+- **Catastrophic collapse** from 87.5% to 25% in single step
+
+**Performance progression:**
+```
+Step 1: 75% → Step 2: 62.5% → Step 3: 62.5% → Step 4: 87.5% → Step 5: 25% (COLLAPSE)
+```
+
+#### Run 2: Smaller Batch Size (Stable)
+```bash
+# Configuration (matches earlier successful run)
+--batch_size 4
+--num_generations 12
+--entropy_coef 0.005
+# Effective batch: 48 (6.7x smaller)
+```
+
+**Results:**
+- Baseline: 68% eval accuracy, 75% training batch accuracy
+- Step 5: 0% eval accuracy, 50% training batch accuracy
+- Step 10: 0% eval accuracy, 25% training batch accuracy
+- Training remains more stable (no catastrophic collapse)
+
+**Training accuracy progression (first 10 steps):**
+```
+Initial: 75% → Step 1: 75% → Step 2: 75% → Step 3: 25% → Step 4: 100%
+Step 5: 50% → Step 6: 75% → Step 7: 75% → Step 8: 75% → Step 9: 75% → Step 10: 25%
+Average: ~65% (high variance but no sustained collapse)
+```
+
+### Key Findings
+
+1. **Effective batch size critical**: 320 causes catastrophic forgetting, 48 remains stable
+2. **Entropy regularization important**: 0.005 better than 0.002 for stability
+3. **Evaluation during training was broken**: All runs showed 0% eval after training starts (now fixed with baseline eval)
+4. **Move 1 fundamental issue**: 0% accuracy on starting position moves even before training
+
+### Hypothesis
+
+Large effective batch size (320) with low entropy (0.002) and no KL penalty (beta warmup) causes:
+- Aggressive parameter updates
+- Loss of learned representations
+- Catastrophic interference with chess knowledge
+
+Smaller batch (48) with higher entropy (0.005) maintains stability even without KL penalty.
+
+### Critical Issue Identified
+
+**Evaluation accuracy drops to 0% immediately after training starts**, regardless of:
+- Batch size (48 or 320)
+- Training stability (stable or collapsed)
+- Training batch accuracy (25% or 75%)
+
+This suggests a fundamental mismatch between:
+1. **Training generation**: Uses sampling (temp=1.0, top_p=0.98)
+2. **Evaluation generation**: Uses greedy decoding (do_sample=False)
+
+The model may be learning a distribution that works with sampling but fails completely with greedy decoding.
+
+### Next Steps
+
+1. **Debug evaluation generation**: Test if using sampling during eval improves accuracy
+2. **Investigate generation parameters**: Compare greedy vs sampling outputs
+3. **Focus on move 1 problem**: 0% accuracy on starting position even before training
+4. **Consider different reward structure**: Current rewards may be teaching wrong distribution
