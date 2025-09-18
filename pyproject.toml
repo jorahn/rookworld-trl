@@ -15,30 +15,25 @@ dependencies = [
     "transformers>=4.46.3",
     "trl>=0.22.0",
     "accelerate>=0.30.0",
-    
     # Chess-specific dependencies
     "chess>=1.10.0",
     "python-chess>=1.999",
-    
     # Data handling
     "datasets>=3.1.0",
     "numpy>=1.24.0",
     "pandas>=2.0.3",
-    
     # Dataset source (RookWorld)
     "huggingface-hub>=0.34.4",
-    
     # Utilities
     "tiktoken>=0.5.0",
     "safetensors>=0.4.0",
-    
     # Optional visualization
     "matplotlib>=3.7.5",
     "seaborn>=0.13.2",
-    
     # Logging and monitoring
     "tensorboard>=2.14.0",
     "wandb>=0.16.0",
+    "python-levenshtein>=0.27.1",
 ]
 requires-python = ">=3.9"
 readme = "README.md"

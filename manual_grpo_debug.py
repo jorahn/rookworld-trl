@@ -26,6 +26,8 @@ import time
 import math
 import logging
 import os
+import re
+import json
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from src.rookworld_trl.rewards import create_reward_function
@@ -47,6 +49,122 @@ def generate_eval(model, **kwargs):
         model.train()
     return outputs
 
+def evaluate_on_eval_set(model, tokenizer, eval_file="opening_dataset_eval.json", max_samples=50):
+    """Evaluate model on held-out eval set and return accuracy."""
+    import json
+
+    try:
+        with open(eval_file) as f:
+            eval_data = json.load(f)
+    except FileNotFoundError:
+        print(f"  ⚠️ Eval file {eval_file} not found, skipping evaluation")
+        return None
+
+    # Sample subset for speed
+    if max_samples and max_samples < len(eval_data):
+        import random
+        eval_data = random.sample(eval_data, max_samples)
+
+    exact_matches = 0
+    by_move = {}
+
+    for sample in eval_data:
+        prompt = sample["prompt"]
+        expected = sample["expected_fen"]
+        move_num = sample.get("move_num", 0)
+
+        if move_num not in by_move:
+            by_move[move_num] = {"correct": 0, "total": 0}
+        by_move[move_num]["total"] += 1
+
+        # Generate with greedy decoding for consistency
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=100,
+                do_sample=False,  # Greedy
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+        prompt_len = inputs.input_ids.shape[1]
+        completion = tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True)
+
+        # Extract FEN
+        parts = completion.split("+")
+        if parts and parts[0].strip():
+            generated_fen = parts[0].strip()
+            if generated_fen == expected:
+                exact_matches += 1
+                by_move[move_num]["correct"] += 1
+
+    accuracy = exact_matches / len(eval_data) * 100
+
+    # Report results
+    print(f"  📊 Eval accuracy: {exact_matches}/{len(eval_data)} ({accuracy:.1f}%)")
+
+    # Report move 1 specifically if present
+    if 1 in by_move:
+        move1_acc = by_move[1]["correct"] / by_move[1]["total"] * 100
+        print(f"     Move 1: {by_move[1]['correct']}/{by_move[1]['total']} ({move1_acc:.0f}%)")
+
+    return accuracy
+
+def save_checkpoint(model, optimizer, step, checkpoint_dir="checkpoints"):
+    """Save model and optimizer checkpoint."""
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_step_{step}")
+    os.makedirs(checkpoint_path, exist_ok=True)
+
+    # Save model
+    model.save_pretrained(checkpoint_path)
+    print(f"  💾 Saved model checkpoint to {checkpoint_path}")
+
+    # Save optimizer state
+    torch.save(optimizer.state_dict(), os.path.join(checkpoint_path, "optimizer.pt"))
+
+    # Save metadata
+    metadata = {
+        "step": step,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(os.path.join(checkpoint_path, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    return checkpoint_path
+
+def get_lr_with_schedule(step, total_steps, base_lr, schedule="constant", warmup_steps=0):
+    """Calculate learning rate based on schedule."""
+    if schedule == "constant":
+        return base_lr
+
+    # Warmup phase
+    if step < warmup_steps:
+        return base_lr * (step + 1) / warmup_steps
+
+    # Post-warmup scheduling
+    if schedule == "cosine":
+        # Cosine decay from base_lr to 0
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return base_lr * 0.5 * (1 + math.cos(math.pi * progress))
+    elif schedule == "linear":
+        # Linear decay from base_lr to 0
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return base_lr * (1 - progress)
+    elif schedule == "step":
+        # Step decay: halve every 1/3 of training
+        if step > total_steps * 2/3:
+            return base_lr * 0.25
+        elif step > total_steps * 1/3:
+            return base_lr * 0.5
+        return base_lr
+
+    return base_lr
+
 def manual_grpo_single_batch(
     steps: int = 1,
     beta_adapt: bool = False,
@@ -59,6 +177,13 @@ def manual_grpo_single_batch(
     grad_accum_steps: int = 1,
     beta_warmup_steps: int = 20,
     entropy_coef: float = 0.005,
+    task_type: str = "P",
+    checkpoint_dir: str = "checkpoints",
+    eval_every: int = 0,
+    eval_file: str = "opening_dataset_eval.json",
+    early_stop_threshold: float = 95.0,
+    lr_schedule: str = "constant",
+    lr_warmup_steps: int = 0,
 ):
     """
     Manually implement GRPO for a single batch with extensive logging
@@ -69,7 +194,8 @@ def manual_grpo_single_batch(
     
     # Configuration tuned for overfitting a single batch
     max_new_tokens = 128
-    learning_rate = 2e-6
+    base_learning_rate = 2e-6
+    learning_rate = base_learning_rate  # Will be adjusted by scheduler
     # Beta schedule
     beta_after_warmup = 0.005
     beta = 0.0
@@ -87,12 +213,23 @@ def manual_grpo_single_batch(
     weight_decay = 0.0
     
     print(f"📋 Configuration (overfit defaults, 2025-09-03r5):")
+    print(f"  Task type: {task_type}")
     print(f"  Batch size: {batch_size}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Max new tokens: {max_new_tokens}")
     print(f"  Beta (KL penalty): {beta} (warmup → {beta_after_warmup} after {beta_warmup_steps} steps)")
     print(f"  KL: token-level KL(p||q) over generated tokens; Adv clip=±2.0; Entropy coef={entropy_coef}")
     print(f"  Steps: {steps} (sequential GRPO updates)")
+    if checkpoint_every > 0:
+        print(f"  Checkpoints: Every {checkpoint_every} steps to {checkpoint_dir}/")
+    elif checkpoint_every == -1:
+        print(f"  Checkpoints: Only at end of training to {checkpoint_dir}/")
+    else:
+        print(f"  Checkpoints: Disabled")
+    if eval_every > 0:
+        print(f"  Evaluation: Every {eval_every} steps on {eval_file}")
+        print(f"  Early stopping: At {early_stop_threshold}% eval accuracy")
+    print(f"  LR schedule: {lr_schedule} (base={base_learning_rate})")
     # Gradient accumulation / micro-updates per batch
     total_samples = batch_size * num_generations
     if grad_accum_steps < 1:
@@ -154,17 +291,41 @@ def manual_grpo_single_batch(
     reward_fn = create_reward_function()
     
     # Load dataset samples once (already shuffled in generator)
-    print(f"📊 Loading mixed batch...")
-    # Ensure we have enough prompts available for larger batches
-    dg_size = max(50, batch_size * 3)
-    data_generator = RookWorldDataGenerator(dataset_size=dg_size, seed=seed)
-    # Prefer P-only prompts for overfit batch, fallback to mixed
-    p_only = [prompt for t, prompt, _, _ in data_generator.samples if t == 'P']
-    if len(p_only) >= batch_size:
-        ordered_prompts = p_only
-        print(f"🧪 Overfit preset: using P-only prompts ({len(ordered_prompts)} available)")
+    print(f"📊 Loading batch for task type: {task_type}...")
+
+    # Check if we should use opening dataset for A: tasks
+    import os
+    import json
+    if task_type == "A" and os.path.exists("opening_dataset_train.json"):
+        print(f"📂 Loading opening dataset for A: task training...")
+        with open("opening_dataset_train.json") as f:
+            opening_data = json.load(f)
+        ordered_prompts = [sample["prompt"] for sample in opening_data]
+        print(f"🎯 Loaded {len(ordered_prompts)} opening position prompts")
+        # Focus on move 1 positions for initial training
+        move_1_prompts = [sample["prompt"] for sample in opening_data if sample["move_num"] == 1]
+        print(f"  → {len(move_1_prompts)} from starting position (move 1)")
     else:
-        ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
+        # Default RookWorld dataset loading
+        dg_size = max(100, batch_size * 5)  # Increased size for better task selection
+        data_generator = RookWorldDataGenerator(dataset_size=dg_size, seed=seed)
+
+        # Filter prompts based on task type
+        if task_type == "P":
+            ordered_prompts = [prompt for t, prompt, _, _ in data_generator.samples if t == 'P']
+            print(f"🧪 P-only mode: using {len(ordered_prompts)} P: task prompts")
+        elif task_type == "A":
+            ordered_prompts = [prompt for t, prompt, _, _ in data_generator.samples if t == 'A']
+            print(f"🧪 A-only mode: using {len(ordered_prompts)} A: task prompts")
+        else:  # mixed
+            ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
+            print(f"🧪 Mixed mode: using all {len(ordered_prompts)} prompts")
+
+        if len(ordered_prompts) < batch_size:
+            print(f"⚠️ Warning: Only {len(ordered_prompts)} prompts available for task type {task_type}, need {batch_size}")
+            # Fallback to all prompts if not enough task-specific ones
+            ordered_prompts = [prompt for _, prompt, _, _ in data_generator.samples]
+
     total_prompts = len(ordered_prompts)
     
     # Step 1 batch (fixed): first slice of ordered prompts
@@ -197,7 +358,8 @@ def manual_grpo_single_batch(
     def test_model_performance(model, model_name):
         """Test model performance and return average reward (deterministic, greedy)"""
         all_scores = []
-        
+        a_task_metrics = {"exact_match": 0, "total_distance": 0, "valid_fens": 0, "count": 0}
+
         for i, prompt in enumerate(prompts):
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
@@ -212,13 +374,53 @@ def manual_grpo_single_batch(
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            
+
             prompt_len = inputs.input_ids.shape[1]
             completions = []
             completion_tokens = outputs[0][prompt_len:]
             completion = tokenizer.decode(completion_tokens, skip_special_tokens=True)
             completions.append(completion)
-            
+
+            # Track A: task specific metrics
+            if prompt.startswith("A: "):
+                a_task_metrics["count"] += 1
+                # Extract expected FEN and compare
+                try:
+                    import chess
+                    import Levenshtein
+                    # Parse prompt to get expected transition
+                    env_match = re.search(r'A:\s*([^+]+)\+([^+]+)\+', prompt)
+                    if env_match:
+                        fen = env_match.group(1).strip()
+                        move_uci = env_match.group(2).strip()
+                        board = chess.Board(fen)
+                        move = chess.Move.from_uci(move_uci)
+                        if move in board.legal_moves:
+                            board.push(move)
+                            expected_fen = board.fen()
+                            # Extract predicted FEN from response
+                            parts = completion.split("+")
+                            if parts and parts[0].strip():
+                                predicted_fen = parts[0].strip()
+
+                                # Compare full FENs for exact match
+                                if predicted_fen == expected_fen:
+                                    a_task_metrics["exact_match"] += 1
+
+                                # Calculate Levenshtein distance on full FEN
+                                distance = Levenshtein.distance(expected_fen, predicted_fen)
+                                a_task_metrics["total_distance"] += distance
+
+                                # Check if valid FEN
+                                try:
+                                    chess.Board(predicted_fen)
+                                    a_task_metrics["valid_fens"] += 1
+                                except:
+                                    pass
+                except Exception as e:
+                    # Debug: print exception to understand what's failing
+                    print(f"    Metric calculation error: {e}")
+
             try:
                 scores = reward_fn(completions, prompts=[prompt] * len(completions))
                 all_scores.extend(scores)
@@ -227,14 +429,24 @@ def manual_grpo_single_batch(
             except Exception as e:
                 print(f"  Prompt {i+1}: scoring error - {e}")
                 all_scores.extend([-1.0])
-        
+
         overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
         positive_ratio = sum(1 for s in all_scores if s > 0) / len(all_scores) if all_scores else 0.0
-        
+
         print(f"📊 {model_name} Performance:")
         print(f"  Average reward: {overall_avg:.4f}")
         print(f"  Positive ratio: {positive_ratio*100:.1f}%")
-        
+
+        # Report A: task metrics if applicable
+        if a_task_metrics["count"] > 0:
+            exact_rate = a_task_metrics["exact_match"] / a_task_metrics["count"]
+            valid_rate = a_task_metrics["valid_fens"] / a_task_metrics["count"]
+            avg_distance = a_task_metrics["total_distance"] / a_task_metrics["count"]
+            print(f"  A: Task Metrics:")
+            print(f"    - Exact FEN match: {exact_rate*100:.1f}%")
+            print(f"    - Valid FEN rate: {valid_rate*100:.1f}%")
+            print(f"    - Avg Levenshtein distance: {avg_distance:.2f}")
+
         return overall_avg
     
     # Test initial performance
@@ -542,6 +754,13 @@ def manual_grpo_single_batch(
     kl_ratio = abs(avg_kl_loss_val) / (abs(avg_pg_loss_val) + abs(avg_kl_loss_val) + 1e-8) * 100
     print(f"  KL penalty ratio: {kl_ratio:.1f}%")
     
+    # Update learning rate for step 1
+    current_lr = get_lr_with_schedule(1, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = current_lr
+    if current_lr != base_learning_rate:
+        print(f"  📈 LR schedule: {lr_schedule} → lr={current_lr:.2e} (base={base_learning_rate:.2e})")
+
     # If no micro-updates were performed (e.g., empty completions), ensure one update
     if steps_done == 0:
         print(f"\n🔄 Performing gradient update...")
@@ -607,6 +826,27 @@ def manual_grpo_single_batch(
     else:
         print(f"  ✅ KL and PG balanced - good regularization")
     
+    # Evaluation for step 1
+    eval_accuracy = None
+    if eval_every > 0 and eval_every == 1:
+        print(f"\n📊 Evaluating on held-out set...")
+        eval_accuracy = evaluate_on_eval_set(training_model, tokenizer, eval_file, max_samples=50)
+
+        if eval_accuracy is not None and eval_accuracy >= early_stop_threshold:
+            print(f"\n✅ Early stopping: Eval accuracy {eval_accuracy:.1f}% >= {early_stop_threshold}%")
+            # Save final checkpoint on early stop
+            if checkpoint_every != 0:
+                checkpoint_path = save_checkpoint(training_model, optimizer, 1, checkpoint_dir)
+                tokenizer.save_pretrained(checkpoint_path)
+                print(f"  Final checkpoint saved at {checkpoint_path}")
+            # Set flag to skip further steps
+            steps = 1
+
+    # Only checkpoint if checkpoint_every > 0 and step 1 is a multiple
+    if checkpoint_every > 0 and (1 % checkpoint_every == 0):
+        checkpoint_path = save_checkpoint(training_model, optimizer, 1, checkpoint_dir)
+        tokenizer.save_pretrained(checkpoint_path)
+
     # Record metrics for step 1
     # Safely convert tensors to scalars for metrics
     _pg_val = float(avg_pg_loss_val)
@@ -629,6 +869,9 @@ def manual_grpo_single_batch(
 
     # Prepare for optional additional steps
     last_post_performance = post_performance
+
+    # Track if we early stopped
+    early_stopped = False
 
     # Sequential extra steps (flat style, explicit)
     if steps > 1:
@@ -854,6 +1097,13 @@ def manual_grpo_single_batch(
             _t_loss = time.time() - _t_loss0
             print(f"[timing] loss_update: {_t_loss:.2f}s")
 
+            # Update learning rate with schedule
+            current_lr = get_lr_with_schedule(step_idx, steps, base_learning_rate, lr_schedule, lr_warmup_steps)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
+            if current_lr != base_learning_rate:
+                print(f"  📈 LR schedule: {lr_schedule} → lr={current_lr:.2e} (base={base_learning_rate:.2e})")
+
             # Beta warmup + optional adaptation
             if step_idx <= beta_warmup_steps:
                 beta = 0.0
@@ -888,14 +1138,28 @@ def manual_grpo_single_batch(
             _step_secs = time.time() - _step_t0
             print(f"\n⏱️ Timing (step {step_idx}): generation={_t_generation:.2f}s, rewards={_t_rewards:.2f}s, advantages={_t_adv:.2f}s, loss_update={_t_loss:.2f}s, post_eval={_t_post_eval:.2f}s, analysis={_t_analysis:.2f}s, total={_step_secs:.2f}s")
 
-            # Checkpoint
-            if checkpoint_every and (step_idx % checkpoint_every == 0):
-                ckpt_dir = f"./manual_ckpt_step_{step_idx}"
-                print(f"\n💾 Saving checkpoint at {ckpt_dir}")
-                training_model.save_pretrained(ckpt_dir)
-                tokenizer.save_pretrained(ckpt_dir)
-                with open(f"{ckpt_dir}/metadata.txt", "w") as f:
-                    f.write(f"step={step_idx}\n beta={beta}\n target_kl={target_kl}\n")
+            # Evaluation on held-out set
+            eval_accuracy = None
+            if eval_every > 0 and (step_idx % eval_every == 0):
+                print(f"\n📊 Evaluating on held-out set...")
+                eval_accuracy = evaluate_on_eval_set(training_model, tokenizer, eval_file, max_samples=50)
+
+                if eval_accuracy is not None:
+                    if eval_accuracy >= early_stop_threshold:
+                        print(f"\n✅ Early stopping: Eval accuracy {eval_accuracy:.1f}% >= {early_stop_threshold}%")
+                        # Save final checkpoint before stopping
+                        if checkpoint_every != 0:
+                            checkpoint_path = save_checkpoint(training_model, optimizer, step_idx, checkpoint_dir)
+                            tokenizer.save_pretrained(checkpoint_path)
+                            print(f"  Final checkpoint saved at {checkpoint_path}")
+                        early_stopped = True
+                        last_post_performance = post_performance
+                        break
+
+            # Checkpoint only at specified intervals (not at every step)
+            if checkpoint_every > 0 and (step_idx % checkpoint_every == 0):
+                checkpoint_path = save_checkpoint(training_model, optimizer, step_idx, checkpoint_dir)
+                tokenizer.save_pretrained(checkpoint_path)
 
             # Store per-step metrics (overview)
             pre_val = float(post_performance - perf_delta)
@@ -917,6 +1181,14 @@ def manual_grpo_single_batch(
                 'beta': float(beta),
                 'sec': float(_step_secs),
             })
+
+    # Save final checkpoint if checkpoint_every == -1 (only at end)
+    final_step = len(step_metrics) if step_metrics else 1
+    if checkpoint_every == -1 and not early_stopped:
+        print(f"\n💾 Saving final checkpoint at end of training (step {final_step})...")
+        checkpoint_path = save_checkpoint(training_model, optimizer, final_step, checkpoint_dir)
+        tokenizer.save_pretrained(checkpoint_path)
+        print(f"  Final checkpoint saved at {checkpoint_path}")
 
     return {
         'initial_performance': initial_performance,
@@ -973,7 +1245,13 @@ def main():
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--beta_adapt", action="store_true", default=False)
     parser.add_argument("--target_kl", type=float, default=1.0)
-    parser.add_argument("--checkpoint_every", type=int, default=0)
+    parser.add_argument("--checkpoint_every", type=int, default=0, help="Save checkpoint every N steps (0=disabled, -1=only at end)")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
+    parser.add_argument("--eval_every", type=int, default=0, help="Evaluate on held-out set every N steps (0=disabled)")
+    parser.add_argument("--eval_file", type=str, default="opening_dataset_eval.json", help="Evaluation dataset file")
+    parser.add_argument("--early_stop_threshold", type=float, default=95.0, help="Early stop if eval accuracy >= this")
+    parser.add_argument("--lr_schedule", type=str, default="constant", choices=["constant", "cosine", "linear", "step"], help="Learning rate schedule")
+    parser.add_argument("--lr_warmup_steps", type=int, default=0, help="LR warmup steps for schedules")
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=4, help="prompts per microbatch")
@@ -984,6 +1262,8 @@ def main():
     )
     parser.add_argument("--beta_warmup_steps", type=int, default=20, help="warmup steps with beta=0 before switching to beta_after_warmup")
     parser.add_argument("--entropy_coef", type=float, default=0.005, help="entropy regularization coefficient")
+    parser.add_argument("--task_type", type=str, default="P", choices=["P", "A", "mixed"],
+                      help="Task type: P (policy), A (environment), or mixed")
     args = parser.parse_args()
 
     try:
@@ -1006,6 +1286,13 @@ def main():
             grad_accum_steps=args.grad_accum_steps,
             beta_warmup_steps=args.beta_warmup_steps,
             entropy_coef=args.entropy_coef,
+            task_type=args.task_type,
+            checkpoint_dir=args.checkpoint_dir,
+            eval_every=args.eval_every,
+            eval_file=args.eval_file,
+            early_stop_threshold=args.early_stop_threshold,
+            lr_schedule=args.lr_schedule,
+            lr_warmup_steps=args.lr_warmup_steps,
         )
         
         print(f"\n🎯 FINAL SUMMARY:")

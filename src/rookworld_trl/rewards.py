@@ -13,6 +13,7 @@ import time
 import shutil
 import os
 from functools import lru_cache
+import Levenshtein
 from .utils import normalize_spacing
 
 
@@ -510,31 +511,174 @@ class ChessRewardScorer:
         return max(0.0, min(1.0, score))
     
     def _score_environment_task(self, prompt: str, response: str) -> float:
-        """Score A: (Environment) task - environment transition prediction."""
+        """Score A: (Environment) task with asymmetric Levenshtein-based rewards.
+
+        Reward structure:
+        - Schema validation: 0 to +0.3 (30%)
+        - FEN accuracy: +0.5 for perfect, -0.5 to 0 for errors (50%)
+        - FEN validity: -0.2 to +0.2 (20%)
+
+        Total range: -1.0 to +1.0
+        """
         # Extract FEN and move from A: task format: "A: FEN+move+history+"
-        env_match = re.search(r'A:\s*([^+]+)\+([^+]+)\+', prompt)
+        env_match = re.search(r'A:\s*([^+]+)\+([^+]+)\+([^+]*)\+?', prompt)
         if not env_match:
-            return 0.1
-        
+            return -0.5  # Strong penalty for malformed prompt
+
         fen_candidate = env_match.group(1).strip()
         move_candidate = env_match.group(2).strip()
-        
+        history = env_match.group(3).strip() if env_match.group(3) else ""
+
         try:
-            # Parse the board
+            # Parse the board and move
             board = chess.Board(fen_candidate)
-            # Validate the move exists
-            move = chess.Move.from_uci(move_candidate) if len(move_candidate) == 4 else None
-            if move and move in board.legal_moves:
-                # Format scoring for environment response
-                format_score = self._score_environment_format(response)
-                # Content scoring for environment prediction
-                content_score = self._score_environment_content(board, move, response)
-                return 0.3 * format_score + 0.7 * content_score
+            move = chess.Move.from_uci(move_candidate)
+
+            if move not in board.legal_moves:
+                return -0.8  # Strong penalty for illegal move in prompt
+
+            # Calculate expected FEN after move
+            board_copy = board.copy()
+            board_copy.push(move)
+            expected_fen = board_copy.fen()
+
+            # Score the response
+            schema_score = self._score_environment_schema(response)
+            fen_score = self._score_environment_fen_accuracy(response, expected_fen)
+            validity_score = self._score_environment_validity(response, board_copy)
+
+            total_score = schema_score + fen_score + validity_score
+
+            return max(-1.0, min(1.0, total_score))
+
+        except (ValueError, AttributeError, chess.InvalidMoveError) as e:
+            # Invalid board or move format
+            return -0.5
+
+    def _score_environment_schema(self, response: str) -> float:
+        """Score schema compliance for A: task response (0 to +0.03)."""
+        score = 0.0
+
+        # Check for correct delimiter structure
+        parts = response.split("+")
+
+        # Correct field count (4 fields: fen, reward, terminated, truncated)
+        if len(parts) >= 4:
+            score += 0.01
+
+            # Validate field types
+            # Field 1: FEN-like string (contains "/" and pieces)
+            if re.search(r'[rnbqkpRNBQKP1-8]+/[rnbqkpRNBQKP1-8/]+', parts[0]):
+                score += 0.005
+
+            # Field 2: Float reward
+            try:
+                float(parts[1])
+                score += 0.005
+            except ValueError:
+                pass
+
+            # Field 3: 0/1 for terminated
+            if parts[2].strip() in ['0', '1', 'true', 'false']:
+                score += 0.005
+
+            # Field 4: 0/1 for truncated
+            if len(parts) > 3 and parts[3].strip() in ['0', '1', 'true', 'false']:
+                score += 0.005
+
+        return min(0.03, score)
+
+    def _score_environment_fen_accuracy(self, response: str, expected_fen: str) -> float:
+        """Score FEN accuracy with asymmetric rewards (+0.5 for perfect, -0.7 for ANY errors).
+
+        IMPORTANT: Only the COMPLETE FEN (up to move numbers) must be correct for positive reward.
+        This includes: board position, turn, castling rights, en passant, halfmove, fullmove.
+        """
+        # Extract FEN from response
+        parts = response.split("+")
+        if not parts or not parts[0].strip():
+            return -0.7  # No FEN found
+
+        predicted_fen = parts[0].strip()
+
+        # Check if it's a complete FEN (should have 6 space-separated parts)
+        predicted_parts = predicted_fen.split()
+        expected_parts = expected_fen.split()
+
+        if len(predicted_parts) < 6:
+            # Incomplete FEN - missing turn, castling, en passant, or move counts
+            return -0.7  # Severe penalty for incomplete response
+
+        # Compare the full FEN up to move numbers
+        # This ensures en passant, castling rights, etc. are all correct
+
+        # Option 1: Exact match on everything = +0.5
+        if predicted_fen == expected_fen:
+            return 0.5
+
+        # Option 2: If move numbers differ slightly but everything else is perfect
+        # Compare first 5 parts (excluding fullmove number which might vary)
+        if len(predicted_parts) >= 6 and len(expected_parts) >= 6:
+            # Check if everything except maybe move numbers is correct
+            if (predicted_parts[0] == expected_parts[0] and  # Board position
+                predicted_parts[1] == expected_parts[1] and  # Turn
+                predicted_parts[2] == expected_parts[2] and  # Castling
+                predicted_parts[3] == expected_parts[3] and  # En passant
+                predicted_parts[4] == expected_parts[4]):    # Halfmove clock
+                # Everything except fullmove is correct - still reward
+                if predicted_parts[5] == expected_parts[5]:
+                    return 0.5  # Perfect match
+                else:
+                    # Only fullmove differs - minor penalty
+                    return -0.3
+
+        # ANY other mismatch (including missing en passant) gets maximum penalty
+        # This is crucial for training the model to handle en passant correctly
+        return -0.7
+
+    def _score_environment_validity(self, response: str, expected_board: chess.Board) -> float:
+        """Score FEN validity and game state preservation (-0.2 to +0.01)."""
+        parts = response.split("+")
+        if not parts or not parts[0].strip():
+            return -0.2
+
+        predicted_fen = parts[0].strip()
+
+        try:
+            # Try to parse as valid FEN
+            predicted_board = chess.Board(predicted_fen)
+
+            # Valid parse gets minimal base score
+            score = 0.005
+
+            # Check for common errors
+            # Count kings - should be exactly one per color
+            white_kings = str(predicted_board).count('K')
+            black_kings = str(predicted_board).count('k')
+
+            if white_kings != 1 or black_kings != 1:
+                return -0.2  # Penalize extra/missing kings heavily
+
+            # Check if turn and castling rights are preserved correctly
+            expected_fen_parts = expected_board.fen().split()
+            predicted_fen_parts = predicted_fen.split()
+
+            if len(predicted_fen_parts) >= 2 and len(expected_fen_parts) >= 2:
+                # Correct turn
+                if predicted_fen_parts[1] == expected_fen_parts[1]:
+                    score += 0.0025
+
+                # Correct castling rights (if specified)
+                if len(predicted_fen_parts) >= 3 and len(expected_fen_parts) >= 3:
+                    if predicted_fen_parts[2] == expected_fen_parts[2]:
+                        score += 0.0025
+
+            return min(0.01, score)
+
         except (ValueError, AttributeError):
-            pass
-        
-        return 0.1  # Minimal score for parsing issues
-    
+            # Invalid FEN that can't be parsed
+            return -0.2
+
     def _score_generic_chess_task(self, prompt: str, response: str) -> float:
         """Fallback scoring for unclear task format."""
         # Look for any FEN-like pattern
