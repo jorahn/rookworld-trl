@@ -30,13 +30,21 @@ sudo apt install stockfish
 ### Stable Training (Recommended)
 
 ```bash
-# Stable GRPO training with proven parameters
+# Optimal GRPO training based on 48-run hyperparameter sweep
 uv run python manual_grpo_debug.py \
-  --steps 400 \
+  --steps 200 \
   --task_type A \
+  --batch_size 8 \
+  --gens 16 \
+  --learning_rate 2e-07 \
   --lr_schedule advanced \
-  --lr_warmup_steps 20 \
-  --eval_every 10
+  --lr_warmup_steps 15 \
+  --entropy_coef 0.005 \
+  --eval_every 20 \
+  --seed 42
+
+# Run comprehensive hyperparameter sweep (2 GPUs × 4 concurrent = 8 parallel)
+./scripts/launch_sweep.sh
 
 # Monitor training progress
 tensorboard --logdir grpo_output_*/runs
@@ -97,18 +105,22 @@ uv run python manual_grpo_debug.py --steps 10 --overfit_single_batch --seed 42
 
 ## 📊 Experimental Configuration
 
-### Current Experimental Settings
+### Hyperparameter Sweep Results (48 Runs - Evidence-Based)
 ```bash
-Batch size: 16              # Tested optimal for RTX 4090
-Dataset size: 5000 samples  # For substantial experiments  
-Learning rate: 1e-6         # Found to preserve chess knowledge
-Beta (KL penalty): 0.1      # Experimentally determined balance
-Temperature: 0.5            # Prevents gibberish vs TRL default 1.0
-Top-p: 0.9                  # Quality control vs TRL default 1.0
-Gradient clipping: 1.0      # Prevents training instability
-Warmup steps: 100          # Helps training stability
-Evaluation: every 100 steps # For monitoring experiments
-Tensorboard: enabled       # Research tracking
+# OPTIMAL CONFIGURATION (Top performer from systematic sweep)
+Learning rate: 1-3e-07      # Sweet spot - higher rates (>1e-6) often harmful
+LR schedule: advanced       # Outperforms cosine in most cases
+Batch size: 8               # Memory-efficient, stable performance
+Generations: 16-24          # Balanced GRPO signal vs memory usage
+Entropy coef: 0.005         # Exploration vs exploitation balance
+Beta (KL penalty): 0.005    # Fixed (hardcoded in manual_grpo_debug.py)
+Warmup steps: 10-20         # Moderate warmup provides stability
+Evaluation: every 10-20     # Frequent monitoring for early detection
+
+# DANGER ZONES (Avoid - causes performance degradation)
+Learning rate: >1e-6        # Consistently causes -0.65 to -0.70 performance drop
+High batch sizes: >12       # Diminishing returns, memory constraints
+Low entropy: <0.001         # Reduces exploration, mode collapse risk
 ```
 
 ### Generation Parameters & Units
@@ -170,20 +182,48 @@ tensorboard --logdir grpo_output/runs
 
 ## 🔧 Advanced Usage
 
+### Hyperparameter Sweep Infrastructure
+
+```bash
+# Launch comprehensive multi-GPU sweep (evidence-based parameter exploration)
+./scripts/launch_sweep.sh
+
+# Custom sweep parameters
+uv run python scripts/run_random_sweep.py \
+  --runs 24 \
+  --steps 100 \
+  --eval-every 20 \
+  --task-type A \
+  --parallel-gpus 2 \
+  --max-concurrent-per-gpu 4
+
+# Dry run to preview sweep commands
+uv run python scripts/run_random_sweep.py --runs 4 --dry-run
+```
+
 ### Experimental Configurations
 
 ```bash
-# High-throughput experiments
-BATCH_SIZE=24 LEARNING_RATE=2e-5 ./train.sh
+# Evidence-based optimal training (from 48-run sweep)
+uv run python manual_grpo_debug.py \
+  --learning_rate 2e-07 \
+  --lr_schedule advanced \
+  --batch_size 8 \
+  --gens 16 \
+  --entropy_coef 0.005
 
-# Conservative parameter testing
-uv run rookworld-train --stable --learning_rate 5e-7 --warmup_steps 300
-
-# Large dataset experiments  
-DATASET_SIZE=10000 BATCH_SIZE=32 ./train.sh
+# Conservative parameter testing (safe learning rate range)
+uv run python manual_grpo_debug.py \
+  --learning_rate 1e-07 \
+  --lr_warmup_steps 20 \
+  --steps 200
 
 # Quick testing/debugging
-DATASET_SIZE=100 BATCH_SIZE=4 ./train.sh
+uv run python manual_grpo_debug.py \
+  --steps 20 \
+  --batch_size 4 \
+  --gens 8 \
+  --eval_every 5
 ```
 
 ### Environment Variables

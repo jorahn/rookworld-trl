@@ -13,46 +13,44 @@
 
 ## Build, Test, and Development Commands
 - Install deps: `uv sync`
-- Run training: `./train.sh` or `uv run rookworld-train --stable`
-- **Manual debug training**: `uv run python manual_grpo_debug.py --steps 500 --task_type A --lr_schedule advanced`
+- **RECOMMENDED training**: `./scripts/launch_sweep.sh` (48-run hyperparameter sweep, 2 GPUs)
+- **Evidence-based optimal training**: `uv run python manual_grpo_debug.py --learning_rate 2e-07 --lr_schedule advanced --batch_size 8 --gens 16 --entropy_coef 0.005`
+- Legacy training: `./train.sh` or `uv run rookworld-train --stable` (may be unstable)
+- Custom sweep: `uv run python scripts/run_random_sweep.py --runs 24 --parallel-gpus 2`
 - Inspect rewards: `uv run rookworld-inspect --batch_size 4`
 - TensorBoard: `tensorboard --logdir grpo_output_*/runs`
 - Lint/format: `uv run black . && uv run isort . && uv run flake8`
 - Type check: `uv run mypy src`
 - Tests: `uv run pytest -q`
 
-## Recent Critical Updates (2025-09-18)
+## Recent Critical Updates (2025-09-19)
 
-### Major Breakthrough: Stable GRPO Training Achieved
-- **Fixed catastrophic collapse bug**: Eval mode switching issue resolved
-- **Successful 435-step training run**: Longest stable training achieved
-- **Performance maintained**: 66% accuracy (vs 68% baseline) without model degradation
+### Comprehensive Hyperparameter Sweep Completed ✅
+- **48 successful runs**: Complete systematic exploration of GRPO parameter space
+- **Multi-GPU infrastructure**: 2 GPUs × 4 concurrent = 8 parallel experiments (6x speedup)
+- **Evidence-based optimization**: Clear learning rate sensitivity patterns identified
 
-### Learning Rate Scheduler Improvements
-- **Advanced 3-phase schedule**: `--lr_schedule advanced` (new default)
-  - Phase 1: Linear warmup from 0 to base_lr
-  - Phase 2: Cosine decay to 5% of base_lr (70% of training)
-  - Phase 3: Linear annealing from 5% to 0 (30% of training)
-- **Fixed warmup bug**: Warmup now applies to ALL schedules including "constant"
-- **Ultra-low base LR**: Default changed from 2e-6 to 1e-7 to prevent training collapse
+### Key Findings - Learning Rate Sensitivity (CRITICAL)
+- **Optimal range**: 1e-7 to 3e-7 provides stable positive gains (+0.12 avg ΔPerf)
+- **Danger zone**: >1e-6 learning rates consistently harmful (-0.35 avg ΔPerf, up to -0.70)
+- **Sweet spot confirmed**: 2e-07 with advanced schedule = top performer (+0.1762 performance gain)
 
-### Critical Bug Fixes
-- **Eval mode fix**: Fixed evaluation function to properly switch between eval/training modes
-  - Previously caused catastrophic model collapse after first training step
-  - Now uses `generate_eval()` which preserves training state correctly
-- **Max tokens**: Evaluation now uses 144 tokens (was 100) for consistency
+### Infrastructure Improvements
+- **Sweep automation**: `./scripts/launch_sweep.sh` for comprehensive parameter exploration
+- **Parallel execution**: Memory-safe multi-GPU training with VRAM management
+- **Enhanced logging**: Full log file parsing with metrics extraction from manual_grpo_debug runs
 
-### New Parameters
-- `--lr_schedule`: Choose from constant, cosine, linear, step, advanced (default: advanced)
-- `--lr_warmup_steps`: Warmup steps for LR schedule (default: 20, was 0)
-- `--task_type`: Focus training on P: (policy) or A: (environment) tasks
-- `--eval_every`: Evaluate on held-out set every N steps (0=disabled)
-- `--checkpoint_every`: Create checkpoints every N steps (-1=only at end)
-- `--save_eval_samples`: Save detailed eval predictions to JSONL files (default: false)
+### Stability Achievements (2025-09-18)
+- **Fixed tensor crashes**: PR #7 comprehensive error handling (100% success rate)
+- **Extended training**: Validated up to 500 steps without crashes
+- **Move 1 breakthrough**: First progress on hardest opening positions (0% → 8%)
 
-### Known Issues
-- **Tensor crash at step 435**: Empty rewards tensor causes reshape failure (GitHub issue #6)
-- Training is stable for 400+ steps but may crash near completion
+### Evidence-Based Best Practices
+- **Learning rate**: 2e-07 (NEVER exceed 1e-6 - causes performance degradation)
+- **LR schedule**: Advanced outperforms cosine across most metrics
+- **Batch/generations**: 8×16 configuration optimal for memory/performance balance
+- **Entropy coefficient**: 0.005 for better exploration (appears in most top performers)
+- **Evaluation frequency**: Every 10-20 steps for early detection
 
 ## Reproducibility & Determinism
 - Manual debug: use `--seed` (default `42`) for reproducible sampling and batching.

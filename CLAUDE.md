@@ -9,20 +9,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `uv run python example.py` - Test package installation
 
 ### Training Commands
-- `./train.sh` - Main GRPO training script with optimized parameters
-- `uv run rookworld-train` - Direct training with custom arguments
+- `./scripts/launch_sweep.sh` - **RECOMMENDED**: Comprehensive hyperparameter sweep (48 runs, 2 GPUs)
+- `uv run python manual_grpo_debug.py --learning_rate 2e-07 --lr_schedule advanced --batch_size 8 --gens 16` - **Evidence-based optimal training**
+- `./train.sh` - Legacy GRPO training script (may be unstable)
 - `uv run rookworld-train --stable` - Conservative training mode for stability
-- **`uv run python manual_grpo_debug.py --steps 500 --task_type A --lr_schedule advanced`** - Recommended stable training
 
 ### Analysis & Debugging
 - `uv run rookworld-inspect --batch_size 4` - Inspect reward function behavior
 - `uv run python manual_grpo_debug.py --seed 42` - Step-by-step GRPO debugging
 - `uv run python manual_grpo_debug.py --overfit_single_batch` - Diagnostic overfit mode
-- **New stable training parameters** (2025-09-18 update):
-  - `--lr_schedule advanced` - 3-phase LR schedule (warmup → cosine → linear) (default)
-  - `--lr_warmup_steps 20` - Learning rate warmup steps (default, was 0)
+- **Evidence-based optimal parameters** (from 48-run sweep, 2025-09-19):
+  - `--learning_rate 2e-07` - **CRITICAL**: Stay in 1e-7 to 3e-7 range (>1e-6 often harmful!)
+  - `--lr_schedule advanced` - Outperforms cosine in most cases
+  - `--lr_warmup_steps 15` - Moderate warmup provides stability (10-20 range)
+  - `--batch_size 8` - Memory-efficient, stable performance
+  - `--gens 16` - Balanced GRPO signal quality vs memory usage
+  - `--entropy_coef 0.005` - High entropy for exploration (top performer setting)
   - `--task_type A|P|mixed` - Focus on environment (A:) or policy (P:) tasks
-  - `--eval_every 10` - Evaluate on held-out set every N steps
+  - `--eval_every 10` - Frequent evaluation for early detection
   - `--checkpoint_every -1` - Only checkpoint at end (-1, default) or every N steps
 - Manual debug flags of interest:
   - `--gens/--num_generations <int>`: completions per prompt (GRPO group size)
@@ -75,8 +79,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Overfit Diagnostics**: Single-batch training for debugging model degradation
 - **Tensorboard Logging**: Real-time metrics and loss tracking
 
-### Entry Points (pyproject.toml)
-- `rookworld-train` - Main training command
+### Entry Points & Scripts
+- `./scripts/launch_sweep.sh` - **RECOMMENDED**: Multi-GPU hyperparameter sweep
+- `scripts/run_random_sweep.py` - Customizable sweep infrastructure with parallel execution
+- `rookworld-train` - Main training command (legacy, may be unstable)
 - `rookworld-inspect` - Reward analysis tool
 
 ### Environment Variables for train.sh
