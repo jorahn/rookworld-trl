@@ -23,12 +23,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `--lr_warmup_steps 20` - Learning rate warmup steps (default, was 0)
   - `--task_type A|P|mixed` - Focus on environment (A:) or policy (P:) tasks
   - `--eval_every 10` - Evaluate on held-out set every N steps
-  - `--checkpoint_every -1` - Only checkpoint at end (-1) or every N steps
+  - `--checkpoint_every -1` - Only checkpoint at end (-1, default) or every N steps
 - Manual debug flags of interest:
   - `--gens/--num_generations <int>`: completions per prompt (GRPO group size)
   - `--ga/--grad_accum_steps <int>`: number of within-batch chunks processed (default 1)
   - `--beta_warmup_steps <int>`: warmup steps with beta=0 (default 20)
   - `--entropy_coef <float>`: entropy regularization (default 0.005)
+  - `--learning_rate/--lr <float>`: base learning rate (default 1e-7)
   - Full run logs are written to `logs/manual_grpo_debug_run-<YYMMDD-HHMMSS>.log` and streamed to stdout
   - Important: Do not reduce `max_new_tokens` — the reward schema depends on this length budget; changing it breaks evaluation comparability.
 

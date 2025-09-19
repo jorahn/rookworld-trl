@@ -4,13 +4,31 @@ Quick evaluation script for checking model performance on held-out eval set.
 """
 
 import json
+import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 import sys
+from src.rookworld_trl.utils import normalize_spacing
+
+def generate_eval(model, **kwargs):
+    """Generate in eval mode to eliminate dropout randomness, restore previous mode"""
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            outputs = model.generate(**kwargs)
+        if was_training:
+            model.train()
+        return outputs
+    except Exception as e:
+        print(f"  ❌ Generation failed: {e}")
+        if was_training:
+            model.train()
+        return None
 
 def evaluate_model(model_path="jrahn/RookWorld-LM-124M", eval_file="opening_dataset_eval.json", sample_size=50):
-    """Evaluate model on held-out eval set."""
+    """Evaluate model on held-out eval set using EXACT FEN matching."""
 
     print(f"Loading model from {model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -39,6 +57,17 @@ def evaluate_model(model_path="jrahn/RookWorld-LM-124M", eval_file="opening_data
     exact_matches = 0
     by_move = {}
 
+    def _extract_generated_fen(text: str) -> str:
+        # Normalize spacing and strip task markers
+        norm = normalize_spacing(text)
+        norm = re.sub(r"^\s*[PA]:\s*", "", norm)
+        # Take content before first '+' as FEN (handles A-task schema: FEN+reward+terminates+truncated)
+        return norm.split("+")[0].strip()
+
+    def _fen_exact_match(pred: str, exp: str) -> bool:
+        # EXACT match - all fields must match
+        return pred == exp
+
     for sample in tqdm(eval_data, desc="Evaluating"):
         prompt = sample["prompt"]
         expected = sample["expected_fen"]
@@ -48,36 +77,39 @@ def evaluate_model(model_path="jrahn/RookWorld-LM-124M", eval_file="opening_data
             by_move[move_num] = {"correct": 0, "total": 0}
         by_move[move_num]["total"] += 1
 
-        # Generate with greedy decoding
+        # Generate with greedy decoding using generate_eval for consistency
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        with torch.no_grad():
-            outputs = model.generate(
-                inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=100,
-                do_sample=False,  # Greedy
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+        # Use generate_eval to properly handle eval mode
+        outputs = generate_eval(
+            model,
+            input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,
+            max_new_tokens=100,
+            do_sample=False,  # Greedy
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        # Handle generation failure
+        if outputs is None:
+            print(f"  ⚠️  Generation failed for sample {sample['prompt'][:50]}...")
+            continue
 
         prompt_len = inputs.input_ids.shape[1]
         completion = tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True)
+        generated_fen = _extract_generated_fen(completion)
 
-        # Extract FEN
-        parts = completion.split("+")
-        if parts and parts[0].strip():
-            generated_fen = parts[0].strip()
-
-            if generated_fen == expected:
-                exact_matches += 1
-                by_move[move_num]["correct"] += 1
+        if generated_fen and _fen_exact_match(generated_fen, expected):
+            exact_matches += 1
+            by_move[move_num]["correct"] += 1
 
     # Calculate metrics
     accuracy = exact_matches / len(eval_data) * 100
 
-    print(f"\n=== EVALUATION RESULTS ===")
+    print(f"\n=== EVALUATION RESULTS (EXACT FEN MATCH) ===")
     print(f"Overall accuracy: {exact_matches}/{len(eval_data)} ({accuracy:.1f}%)")
+    print("Note: Using exact FEN matching - all 6 fields must match exactly")
 
     print("\nBy move number:")
     for move in sorted(by_move.keys()):

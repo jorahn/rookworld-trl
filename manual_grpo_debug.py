@@ -241,6 +241,7 @@ def evaluate_on_eval_set(
     max_samples=50,
     dump_dir: Optional[str] = None,
     eval_step: Optional[int] = None,
+    reward_fn=None,
 ):
     """Evaluate model on held-out eval set and return accuracy."""
     import json
@@ -330,8 +331,22 @@ def evaluate_on_eval_set(
 
     accuracy = exact_matches / len(eval_data) * 100
 
+    # Calculate eval reward if reward function provided
+    eval_reward = None
+    if reward_fn is not None:
+        try:
+            completions = [record["raw_completion"] for record in eval_records]
+            prompts = [record["prompt"] for record in eval_records]
+            rewards = reward_fn(completions, prompts=prompts)
+            eval_reward = sum(rewards) / len(rewards) if rewards else 0.0
+        except Exception as e:
+            print(f"  ⚠️ Eval reward calculation failed: {e}")
+            eval_reward = None
+
     # Report results
     print(f"  📊 Eval accuracy: {exact_matches}/{len(eval_data)} ({accuracy:.1f}%)")
+    if eval_reward is not None:
+        print(f"  🏆 Eval avg reward: {eval_reward:.3f}")
 
     # Report move 1 specifically if present
     if 1 in by_move and by_move[1]["total"] > 0:
@@ -433,6 +448,7 @@ def manual_grpo_single_batch(
     early_stop_threshold: float = 95.0,
     lr_schedule: str = "constant",
     lr_warmup_steps: int = 0,
+    learning_rate: float = 1e-7,
     save_eval_samples: bool = False,
 ):
     """
@@ -444,8 +460,8 @@ def manual_grpo_single_batch(
     
     # Configuration tuned for overfitting a single batch
     max_new_tokens = 128
-    base_learning_rate = 1e-7
-    learning_rate = base_learning_rate  # Will be adjusted by scheduler
+    base_learning_rate = learning_rate
+    # learning_rate will be adjusted by scheduler
     # Beta schedule
     beta_after_warmup = 0.005
     beta = 0.0
@@ -724,6 +740,7 @@ def manual_grpo_single_batch(
             max_samples=50,
             dump_dir=eval_dump_dir,
             eval_step=eval_step_counter,
+            reward_fn=reward_fn,
         )
         eval_step_counter += 1
         if baseline_eval_accuracy is not None:
@@ -1123,6 +1140,7 @@ def manual_grpo_single_batch(
             max_samples=50,
             dump_dir=eval_dump_dir,
             eval_step=eval_step_counter,
+            reward_fn=reward_fn,
         )
         eval_step_counter += 1
 
@@ -1478,6 +1496,7 @@ def manual_grpo_single_batch(
                     max_samples=50,
                     dump_dir=eval_dump_dir,
                     eval_step=eval_step_counter,
+                    reward_fn=reward_fn,
                 )
                 eval_step_counter += 1
 
@@ -1519,8 +1538,24 @@ def manual_grpo_single_batch(
                 'sec': float(_step_secs),
             })
 
-    # Save final checkpoint if checkpoint_every == -1 (only at end)
+    # Final evaluation if eval_every > 0 and we haven't just done one
     final_step = len(step_metrics) if step_metrics else 1
+    final_eval_accuracy = None
+    if eval_every > 0 and (final_step % eval_every != 0):
+        print(f"\n📊 FINAL EVALUATION: Evaluating on held-out set...")
+        final_eval_accuracy = evaluate_on_eval_set(
+            training_model,
+            tokenizer,
+            eval_file,
+            max_samples=50,
+            dump_dir=eval_dump_dir,
+            eval_step=eval_step_counter,
+            reward_fn=reward_fn,
+        )
+        if final_eval_accuracy is not None:
+            print(f"  📌 Final eval accuracy: {final_eval_accuracy:.1f}%")
+
+    # Save final checkpoint if checkpoint_every == -1 (only at end)
     if checkpoint_every == -1 and not early_stopped:
         print(f"\n💾 Saving final checkpoint at end of training (step {final_step})...")
         checkpoint_path = save_checkpoint(training_model, optimizer, final_step, checkpoint_dir)
@@ -1582,7 +1617,7 @@ def main():
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--beta_adapt", action="store_true", default=False)
     parser.add_argument("--target_kl", type=float, default=1.0)
-    parser.add_argument("--checkpoint_every", type=int, default=0, help="Save checkpoint every N steps (0=disabled, -1=only at end)")
+    parser.add_argument("--checkpoint_every", type=int, default=-1, help="Save checkpoint every N steps (0=disabled, -1=only at end)")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--eval_every", type=int, default=0, help="Evaluate on held-out set every N steps (0=disabled)")
     parser.add_argument("--eval_file", type=str, default="opening_dataset_eval.json", help="Evaluation dataset file")
@@ -1590,6 +1625,7 @@ def main():
     parser.add_argument("--save_eval_samples", action="store_true", default=False, help="Save detailed eval predictions to JSONL files")
     parser.add_argument("--lr_schedule", type=str, default="advanced", choices=["constant", "cosine", "linear", "step", "advanced"], help="Learning rate schedule (advanced: warmup->cosine to 5%->linear to 0)")
     parser.add_argument("--lr_warmup_steps", type=int, default=20, help="LR warmup steps for schedules")
+    parser.add_argument("--learning_rate", "--lr", type=float, default=1e-7, help="Base learning rate")
     parser.add_argument("--overfit_single_batch", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=4, help="prompts per microbatch")
@@ -1631,6 +1667,7 @@ def main():
             early_stop_threshold=args.early_stop_threshold,
             lr_schedule=args.lr_schedule,
             lr_warmup_steps=args.lr_warmup_steps,
+            learning_rate=args.learning_rate,
             save_eval_samples=args.save_eval_samples,
         )
         
