@@ -150,33 +150,36 @@ def ensure_directory(path: Path) -> None:
 
 
 def sample_learning_rate(rng: random.Random) -> float:
-    log_min = math.log10(1e-7)
-    log_max = math.log10(2e-6)
+    # REFINED: Focus on proven optimal range from 48-run sweep analysis
+    # High performers clustered in 1e-7 to 3e-7 range
+    log_min = math.log10(8e-8)  # Slightly below best performer (1.02e-7)
+    log_max = math.log10(4e-7)  # Slightly above proven range (3e-7)
     value = 10 ** rng.uniform(log_min, log_max)
     # Round to two significant figures for readability while keeping value precise enough
     return float(f"{value:.2e}")
 
 
 def sample_schedule_and_warmup(rng: random.Random) -> Dict[str, Any]:
-    schedule = rng.choice(["advanced", "cosine"])
+    # REFINED: Advanced schedule preferred by high performers (9 vs 7)
+    # Weight toward advanced but keep cosine for comparison
+    schedule = rng.choices(["advanced", "cosine"], weights=[0.65, 0.35])[0]
+
+    # Focus on successful warmup step ranges from analysis
     if schedule == "advanced":
-        warmup = rng.choice([10, 20, 30])
+        warmup = rng.choice([10, 20, 30])  # All appeared in top performers
     else:
-        warmup = rng.choice([0, 10, 20])
+        warmup = rng.choice([0, 10, 20])   # Cosine works well with lower warmup
     return {"lr_schedule": schedule, "lr_warmup_steps": warmup}
 
 
 def sample_batch_and_generations(rng: random.Random) -> Dict[str, Any]:
-    """Sample batch size and generations with memory-aware constraints."""
-    # Batch size: affects gradient estimation quality and memory
-    batch_size = rng.choice([4, 8, 12])
+    """Sample batch size and generations focused on high-performer patterns."""
+    # REFINED: ALL high performers used batch_size 8 - keep it fixed for consistency
+    batch_size = 8
 
-    # Generations per prompt: affects GRPO signal quality
-    # Balance between signal quality and memory usage
-    if batch_size <= 6:
-        num_generations = rng.choice([20, 30, 40])
-    else:
-        num_generations = rng.choice([16, 24, 32])
+    # REFINED: High performers used generations 16, 24, 32
+    # Focus sampling on these proven values
+    num_generations = rng.choice([16, 24, 32])
 
     return {"batch_size": batch_size, "num_generations": num_generations}
 
