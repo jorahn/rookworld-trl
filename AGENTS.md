@@ -45,12 +45,19 @@
 - **Extended training**: Validated up to 500 steps without crashes
 - **Move 1 breakthrough**: First progress on hardest opening positions (0% → 8%)
 
-### Evidence-Based Best Practices
-- **Learning rate**: 2e-07 (NEVER exceed 1e-6 - causes performance degradation)
-- **LR schedule**: Advanced outperforms cosine across most metrics
-- **Batch/generations**: 8×16 configuration optimal for memory/performance balance
-- **Entropy coefficient**: 0.005 for better exploration (appears in most top performers)
-- **Evaluation frequency**: Every 10-20 steps for early detection
+### Key Performance Indicators (KPIs) for A: Tasks
+- **PRIMARY KPI**: Evaluation accuracy (% correct on held-out set) - target 80%+
+- **SECONDARY KPI**: Evaluation reward (average reward on held-out set) - higher is better
+- **CRITICAL CHALLENGE**: Move 1 accuracy (starting position transitions) - currently 0-8%
+- **WARNING**: Training metrics can improve while eval metrics worsen (overfitting risk)
+
+### Evidence-Based Best Practices (CORRECTED)
+- **Learning rate**: 1.5-2.4e-07 (only range showing eval accuracy improvement in focused sweep)
+- **LR schedule**: Both advanced and cosine show similar eval performance
+- **Batch/generations**: 8×16 or 8×24 configurations
+- **Entropy coefficient**: 0.002 shows best eval accuracy results
+- **Evaluation frequency**: Every 10-20 steps for early overfitting detection
+- **Overfitting concern**: Tighter parameter ranges may cause training/eval divergence
 
 ## Reproducibility & Determinism
 - Manual debug: use `--seed` (default `42`) for reproducible sampling and batching.

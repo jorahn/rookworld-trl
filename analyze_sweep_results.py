@@ -109,7 +109,14 @@ def analyze_performance_by_param(results: List[Dict[str, Any]]) -> None:
         print(f"Best LR Schedule: {best_schedule}")
 
 if __name__ == "__main__":
-    # Load results from latest sweep
-    sweep_path = "logs/sweeps/20250919_143505"
+    import sys
+
+    # Accept sweep path as command line argument or use default
+    if len(sys.argv) > 1:
+        sweep_path = sys.argv[1]
+    else:
+        sweep_path = "logs/sweeps/20250919_143505"
+
+    print(f"Analyzing sweep results from: {sweep_path}")
     results = load_sweep_results(sweep_path)
     analyze_performance_by_param(results)

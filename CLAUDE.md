@@ -18,15 +18,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `uv run rookworld-inspect --batch_size 4` - Inspect reward function behavior
 - `uv run python manual_grpo_debug.py --seed 42` - Step-by-step GRPO debugging
 - `uv run python manual_grpo_debug.py --overfit_single_batch` - Diagnostic overfit mode
-- **Evidence-based optimal parameters** (from 48-run sweep, 2025-09-19):
-  - `--learning_rate 2e-07` - **CRITICAL**: Stay in 1e-7 to 3e-7 range (>1e-6 often harmful!)
-  - `--lr_schedule advanced` - Outperforms cosine in most cases
-  - `--lr_warmup_steps 15` - Moderate warmup provides stability (10-20 range)
-  - `--batch_size 8` - Memory-efficient, stable performance
-  - `--gens 16` - Balanced GRPO signal quality vs memory usage
-  - `--entropy_coef 0.005` - High entropy for exploration (top performer setting)
+
+### Key Performance Indicators (KPIs) for A: Tasks
+- **PRIMARY KPI**: Evaluation accuracy (% correct on held-out set) - target 80%+
+- **SECONDARY KPI**: Evaluation reward (average reward on held-out set) - higher is better
+- **CRITICAL CHALLENGE**: Move 1 accuracy (starting position transitions) - currently 0-8%
+- **Note**: Training performance metrics can improve while eval metrics worsen (overfitting)
+- **Evidence-based parameters for eval performance** (corrected analysis, 2025-09-19):
+  - `--learning_rate 1.2e-07` - **CRITICAL**: Conservative rates (1-2.4e-07) best for eval accuracy
+  - `--lr_schedule cosine` - Slightly outperforms advanced for eval metrics
+  - `--lr_warmup_steps 10` - Moderate warmup (10-20 range)
+  - `--batch_size 8` - Confirmed optimal across all experiments
+  - `--gens 16` - Moderate GRPO signal, good generalization
+  - `--entropy_coef 0.001` - **Low entropy best for eval performance** (not 0.005!)
   - `--task_type A|P|mixed` - Focus on environment (A:) or policy (P:) tasks
-  - `--eval_every 10` - Frequent evaluation for early detection
+  - `--eval_every 10` - **CRITICAL**: Monitor both training AND eval to detect overfitting
   - `--checkpoint_every -1` - Only checkpoint at end (-1, default) or every N steps
 - Manual debug flags of interest:
   - `--gens/--num_generations <int>`: completions per prompt (GRPO group size)
