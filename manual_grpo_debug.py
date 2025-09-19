@@ -39,6 +39,184 @@ import copy
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
+# Configuration constants for error handling and generation failures
+FAILED_GENERATION_TEXT = "[GENERATION_FAILED]"
+FAILED_GENERATION_LOG_PROB = -10.0
+FAILED_GENERATION_REWARD = -1.0
+DUMMY_COMPLETION_TEXT = "[DUMMY]"
+DUMMY_GENERATION_REWARD = -0.5
+
+def validate_and_process_generation(outputs, num_generations, prompt_length, tokenizer, training_model, reference_model, seed_offset=0):
+    """
+    Validate generation outputs and process them into completions with log probabilities.
+    Handles generation failures gracefully by creating dummy completions.
+    
+    Returns:
+        tuple: (prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info)
+        failure_info contains diagnostic information about any failures encountered
+    """
+    failure_info = {
+        'failed': False,
+        'partial_failure': False,
+        'reason': None,
+        'expected_count': num_generations,
+        'actual_count': 0,
+        'diagnostic_details': []
+    }
+    
+    # Validate generation output
+    if outputs is None:
+        failure_info['failed'] = True
+        failure_info['reason'] = "Generation returned None - possible CUDA OOM, model error, or timeout"
+        failure_info['diagnostic_details'].append("Check CUDA memory usage with 'nvidia-smi'")
+        failure_info['diagnostic_details'].append("Verify model is properly loaded and not corrupted")
+        failure_info['diagnostic_details'].append("Consider reducing batch size or max_new_tokens")
+        
+        print(f"    ❌ GENERATION_FAILURE: {failure_info['reason']}")
+        for detail in failure_info['diagnostic_details']:
+            print(f"       💡 {detail}")
+        
+        prompt_completions = [FAILED_GENERATION_TEXT for _ in range(num_generations)]
+        prompt_log_probs = [FAILED_GENERATION_LOG_PROB for _ in range(num_generations)]
+        prompt_ref_log_probs = [FAILED_GENERATION_LOG_PROB for _ in range(num_generations)]
+        return prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info
+    
+    if not hasattr(outputs, 'sequences') or outputs.sequences is None:
+        failure_info['failed'] = True
+        failure_info['reason'] = "Generation output missing 'sequences' attribute - model generation config error"
+        failure_info['diagnostic_details'].append("Check generation parameters: return_dict_in_generate=True, output_scores=True")
+        failure_info['diagnostic_details'].append("Verify model supports the requested generation configuration")
+        
+        print(f"    ❌ GENERATION_FAILURE: {failure_info['reason']}")
+        for detail in failure_info['diagnostic_details']:
+            print(f"       💡 {detail}")
+        
+        prompt_completions = [FAILED_GENERATION_TEXT for _ in range(num_generations)]
+        prompt_log_probs = [FAILED_GENERATION_LOG_PROB for _ in range(num_generations)]
+        prompt_ref_log_probs = [FAILED_GENERATION_LOG_PROB for _ in range(num_generations)]
+        return prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info
+    
+    actual_count = len(outputs.sequences)
+    failure_info['actual_count'] = actual_count
+    
+    if actual_count != num_generations:
+        failure_info['partial_failure'] = True
+        failure_info['reason'] = f"Partial generation failure: got {actual_count}/{num_generations} completions"
+        
+        if actual_count == 0:
+            failure_info['failed'] = True
+            failure_info['reason'] = "Complete generation failure: no sequences generated"
+            failure_info['diagnostic_details'].append("Model may have hit EOS token immediately")
+            failure_info['diagnostic_details'].append("Check prompt formatting and tokenization")
+            failure_info['diagnostic_details'].append("Verify model is not overtrained (mode collapse)")
+        else:
+            failure_info['diagnostic_details'].append(f"Generated {actual_count} out of {num_generations} requested completions")
+            failure_info['diagnostic_details'].append("This may indicate sampling issues, EOS token problems, or memory constraints")
+            failure_info['diagnostic_details'].append("Consider adjusting temperature, top_p, or generation parameters")
+        
+        print(f"    ⚠️  PARTIAL_GENERATION_FAILURE: {failure_info['reason']}")
+        for detail in failure_info['diagnostic_details']:
+            print(f"       💡 {detail}")
+    
+    # Process actual generations
+    prompt_completions = []
+    prompt_log_probs = []
+    prompt_ref_log_probs = []
+    
+    num_actual = min(actual_count, num_generations)
+    for j in range(num_actual):
+        full_sequence = outputs.sequences[j]
+        completion_tokens = full_sequence[prompt_length:]
+        completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
+        completion_text_normalized = normalize_spacing(completion_text)
+        prompt_completions.append(completion_text_normalized)
+        
+        # Calculate log probs for actual generations
+        with torch.no_grad():
+            train_outputs = training_model(full_sequence.unsqueeze(0))
+            train_logits = train_outputs.logits[0]
+            completion_logits = train_logits[prompt_length-1:-1]
+            completion_log_probs = F.log_softmax(completion_logits, dim=-1)
+            token_log_probs = completion_log_probs.gather(
+                1, completion_tokens.unsqueeze(1)
+            ).squeeze(1)
+            train_total_log_prob = token_log_probs.sum().item()
+            prompt_log_probs.append(train_total_log_prob)
+        
+        with torch.no_grad():
+            ref_outputs = reference_model(full_sequence.unsqueeze(0))
+            ref_logits = ref_outputs.logits[0]
+            ref_completion_logits = ref_logits[prompt_length-1:-1]
+            ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
+            ref_token_log_probs = ref_completion_log_probs.gather(
+                1, completion_tokens.unsqueeze(1)
+            ).squeeze(1)
+            ref_total_log_prob = ref_token_log_probs.sum().item()
+            prompt_ref_log_probs.append(ref_total_log_prob)
+        
+        print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
+        print(f"           Text: {completion_text[:60]}...")
+        print(f"           Normalized: {completion_text_normalized[:60]}...")
+    
+    # Pad with dummy completions for missing generations
+    for j in range(num_actual, num_generations):
+        prompt_completions.append(FAILED_GENERATION_TEXT)
+        prompt_log_probs.append(FAILED_GENERATION_LOG_PROB)
+        prompt_ref_log_probs.append(FAILED_GENERATION_LOG_PROB)
+        print(f"    Gen {j+1}: [DUMMY] Train_LP={FAILED_GENERATION_LOG_PROB}, Ref_LP={FAILED_GENERATION_LOG_PROB}")
+    
+    return prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info
+
+def validate_tensor_for_reshape(tensor, expected_batch_size, expected_num_generations, operation_name="tensor operation"):
+    """
+    Validate that a tensor can be safely reshaped to the expected dimensions.
+    Provides detailed error diagnostics for tensor shape mismatches.
+    
+    Returns:
+        tuple: (is_valid, error_info)
+        error_info contains diagnostic information if validation fails
+    """
+    expected_size = expected_batch_size * expected_num_generations
+    actual_size = tensor.numel()
+    
+    error_info = {
+        'is_empty': actual_size == 0,
+        'size_mismatch': actual_size != expected_size,
+        'expected_size': expected_size,
+        'actual_size': actual_size,
+        'expected_shape': (expected_batch_size, expected_num_generations),
+        'diagnostic_details': []
+    }
+    
+    if actual_size == 0:
+        error_info['diagnostic_details'].extend([
+            f"Empty tensor detected for {operation_name}",
+            "This indicates complete generation failure - no completions were produced",
+            "Check generation phase logs above for specific failure reasons",
+            "Possible causes: CUDA OOM, model loading issues, or prompt formatting errors"
+        ])
+        
+        print(f"  ❌ ERROR: Empty tensor for {operation_name}! Expected {expected_size} elements, got {actual_size}")
+        for detail in error_info['diagnostic_details']:
+            print(f"     💡 {detail}")
+        return False, error_info
+    
+    if actual_size != expected_size:
+        error_info['diagnostic_details'].extend([
+            f"Tensor size mismatch for {operation_name}",
+            f"Cannot reshape [{actual_size}] elements to [{expected_batch_size}, {expected_num_generations}] = {expected_size}",
+            "This indicates partial generation failure or reward calculation error",
+            f"Likely causes: {actual_size // expected_batch_size if actual_size >= expected_batch_size else 'incomplete'} completions per prompt instead of {expected_num_generations}"
+        ])
+        
+        print(f"  ❌ ERROR: Tensor size mismatch for {operation_name}! Expected {expected_size} elements, got {actual_size}")
+        print(f"     Cannot reshape to [{expected_batch_size}, {expected_num_generations}]")
+        for detail in error_info['diagnostic_details']:
+            print(f"     💡 {detail}")
+        return False, error_info
+    
+    return True, error_info
+
 def generate_eval(model, **kwargs):
     """Generate in eval mode to eliminate dropout randomness, restore previous mode"""
     was_training = model.training
@@ -517,111 +695,21 @@ def manual_grpo_single_batch(
             output_scores=True,
         )
         
-        # Validate generation output
-        if outputs is None or not hasattr(outputs, 'sequences') or outputs.sequences is None:
-            print(f"    ⚠️  Generation failed - creating dummy completions")
-            prompt_completions = ["[GENERATION_FAILED]" for _ in range(num_generations)]
-            prompt_log_probs = [-10.0 for _ in range(num_generations)]
-            prompt_ref_log_probs = [-10.0 for _ in range(num_generations)]
-        elif len(outputs.sequences) != num_generations:
-            print(f"    ⚠️  Expected {num_generations} generations, got {len(outputs.sequences)} - padding with dummies")
-            prompt_completions = []
-            prompt_log_probs = []
-            prompt_ref_log_probs = []
-            
-            # Process actual generations
-            num_actual = min(len(outputs.sequences), num_generations)
-            for j in range(num_actual):
-                full_sequence = outputs.sequences[j]
-                completion_tokens = full_sequence[prompt_length:]
-                completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-                completion_text_normalized = normalize_spacing(completion_text)
-                prompt_completions.append(completion_text_normalized)
-                
-                # Calculate log probs for actual generations (simplified)
-                with torch.no_grad():
-                    train_outputs = training_model(full_sequence.unsqueeze(0))
-                    train_logits = train_outputs.logits[0]
-                    completion_logits = train_logits[prompt_length-1:-1]
-                    completion_log_probs = F.log_softmax(completion_logits, dim=-1)
-                    token_log_probs = completion_log_probs.gather(
-                        1, completion_tokens.unsqueeze(1)
-                    ).squeeze(1)
-                    train_total_log_prob = token_log_probs.sum().item()
-                    prompt_log_probs.append(train_total_log_prob)
-                
-                with torch.no_grad():
-                    ref_outputs = reference_model(full_sequence.unsqueeze(0))
-                    ref_logits = ref_outputs.logits[0]
-                    ref_completion_logits = ref_logits[prompt_length-1:-1]
-                    ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
-                    ref_token_log_probs = ref_completion_log_probs.gather(
-                        1, completion_tokens.unsqueeze(1)
-                    ).squeeze(1)
-                    ref_total_log_prob = ref_token_log_probs.sum().item()
-                    prompt_ref_log_probs.append(ref_total_log_prob)
-                
-                print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
-                print(f"           Text: {completion_text[:60]}...")
-                print(f"           Normalized: {completion_text_normalized[:60]}...")
-            
-            # Pad with dummies for missing generations
-            for j in range(num_actual, num_generations):
-                prompt_completions.append("[GENERATION_FAILED]")
-                prompt_log_probs.append(-10.0)
-                prompt_ref_log_probs.append(-10.0)
-                print(f"    Gen {j+1}: [DUMMY] Train_LP=-10.0, Ref_LP=-10.0")
-        else:
-            # Normal case - process all generations
-            prompt_completions = []
-            prompt_log_probs = []
-            prompt_ref_log_probs = []
-            
-            for j in range(num_generations):
-                # Extract completion
-                full_sequence = outputs.sequences[j]
-                completion_tokens = full_sequence[prompt_length:]
-                completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-                
-                # Normalize spacing to prevent KL divergence inflation
-                completion_text_normalized = normalize_spacing(completion_text)
-                prompt_completions.append(completion_text_normalized)
-                
-                # Calculate log probabilities with training model
-                with torch.no_grad():
-                    train_outputs = training_model(full_sequence.unsqueeze(0))
-                    train_logits = train_outputs.logits[0]
-                    
-                    # Get log probs for completion tokens only
-                    completion_logits = train_logits[prompt_length-1:-1]
-                    completion_log_probs = F.log_softmax(completion_logits, dim=-1)
-                    
-                    # Extract log probs for actual tokens
-                    token_log_probs = completion_log_probs.gather(
-                        1, completion_tokens.unsqueeze(1)
-                    ).squeeze(1)
-                    
-                    train_total_log_prob = token_log_probs.sum().item()
-                    prompt_log_probs.append(train_total_log_prob)
-                
-                # Calculate reference log probabilities with reference model
-                with torch.no_grad():
-                    ref_outputs = reference_model(full_sequence.unsqueeze(0))
-                    ref_logits = ref_outputs.logits[0]
-                    
-                    ref_completion_logits = ref_logits[prompt_length-1:-1]
-                    ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
-                
-                    ref_token_log_probs = ref_completion_log_probs.gather(
-                        1, completion_tokens.unsqueeze(1)
-                    ).squeeze(1)
-                    
-                    ref_total_log_prob = ref_token_log_probs.sum().item()
-                    prompt_ref_log_probs.append(ref_total_log_prob)
-                
-                print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
-                print(f"           Text: {completion_text[:60]}...")
-                print(f"           Normalized: {completion_text_normalized[:60]}...")
+        # Use consolidated validation and processing
+        prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info = validate_and_process_generation(
+            outputs, num_generations, prompt_length, tokenizer, training_model, reference_model, 
+            seed_offset=2000 + i
+        )
+        
+        # Log generation failure details for root cause analysis
+        if failure_info['failed'] or failure_info['partial_failure']:
+            print(f"    🚨 ALERT: Generation failure detected for prompt {i+1}")
+            print(f"       Failure type: {'Complete' if failure_info['failed'] else 'Partial'}")
+            print(f"       Expected completions: {failure_info['expected_count']}")
+            print(f"       Actual completions: {failure_info['actual_count']}")
+            print(f"       Root cause analysis:")
+            for detail in failure_info['diagnostic_details']:
+                print(f"         • {detail}")
         
         all_completions.append(prompt_completions)
         all_log_probs.append(prompt_log_probs)
@@ -648,13 +736,13 @@ def manual_grpo_single_batch(
         # Validate completions before scoring
         if not completions or len(completions) == 0:
             print(f"  ⚠️  No completions found for prompt {i+1} - using dummy scores")
-            dummy_scores = [-1.0] * num_generations
+            dummy_scores = [FAILED_GENERATION_REWARD] * num_generations
             all_rewards.append(dummy_scores)
             continue
         elif len(completions) != num_generations:
             print(f"  ⚠️  Expected {num_generations} completions, got {len(completions)} for prompt {i+1}")
             # Pad with dummy scores if needed
-            padded_completions = completions + ["[DUMMY]"] * max(0, num_generations - len(completions))
+            padded_completions = completions + [DUMMY_COMPLETION_TEXT] * max(0, num_generations - len(completions))
             completions = padded_completions[:num_generations]  # Trim if too many
         
         try:
@@ -662,7 +750,7 @@ def manual_grpo_single_batch(
             all_rewards.append(scores)
             
             for j, (completion, score) in enumerate(zip(completions, scores)):
-                completion_display = completion[:40] if completion != "[GENERATION_FAILED]" else "[GEN_FAILED]"
+                completion_display = completion[:40] if completion != FAILED_GENERATION_TEXT else "[GEN_FAILED]"
                 print(f"  Gen {j+1}: Reward={score:6.3f} | {completion_display}...")
             
             avg_score = sum(scores) / len(scores)
@@ -670,7 +758,11 @@ def manual_grpo_single_batch(
             
         except Exception as e:
             print(f"  ❌ Error scoring: {e}")
-            dummy_scores = [-0.5] * num_generations
+            print(f"     🚨 SCORING_FAILURE_ALERT: Reward function error for prompt {i+1}")
+            print(f"     Root cause: {str(e)}")
+            print(f"     Impact: Using dummy reward scores ({DUMMY_GENERATION_REWARD}) for all completions")
+            print(f"     Recommendation: Check reward function implementation and completion formatting")
+            dummy_scores = [DUMMY_GENERATION_REWARD] * num_generations
             all_rewards.append(dummy_scores)
     _t_rewards = time.time() - _t_rewards0
     print(f"[timing] rewards: {_t_rewards:.2f}s")
@@ -688,12 +780,17 @@ def manual_grpo_single_batch(
     print(f"  Total rewards shape: {all_rewards_tensor.shape}")
     print(f"  Rewards: {all_rewards_tensor.numpy()}")
     
-    # Validate tensor shape before reshaping
-    expected_size = batch_size * num_generations
-    if all_rewards_tensor.numel() == 0:
-        print(f"  ❌ ERROR: Empty rewards tensor! Expected {expected_size} rewards, got {all_rewards_tensor.numel()}")
-        print(f"  This indicates generation failure - check the generation phase logs above.")
-        print(f"  Skipping training step due to empty rewards.")
+    # Validate tensor shape before reshaping using helper function
+    is_valid, error_info = validate_tensor_for_reshape(
+        all_rewards_tensor, batch_size, num_generations, "rewards tensor reshape"
+    )
+    
+    if not is_valid:
+        print(f"  🚨 CRITICAL: Training step cannot continue due to tensor validation failure")
+        print(f"  Skipping training step to prevent crash")
+        
+        error_msg = "Empty rewards tensor - generation failed" if error_info['is_empty'] else f"Tensor size mismatch: expected {error_info['expected_size']}, got {error_info['actual_size']}"
+        
         return {
             'initial_performance': initial_performance,
             'post_performance': initial_performance,  # No change since we're skipping
@@ -707,27 +804,7 @@ def manual_grpo_single_batch(
             'grad_accum_steps': grad_accum_steps,
             'effective_batch': batch_size * num_generations,
             'microbatch_size': microbatch_size,
-            'error': 'Empty rewards tensor - generation failed'
-        }
-    elif all_rewards_tensor.numel() != expected_size:
-        print(f"  ❌ ERROR: Rewards tensor size mismatch! Expected {expected_size} rewards, got {all_rewards_tensor.numel()}")
-        print(f"  Cannot reshape [{all_rewards_tensor.numel()}] to [{batch_size}, {num_generations}]")
-        print(f"  This indicates partial generation failure or reward calculation error.")
-        print(f"  Skipping training step due to tensor size mismatch.")
-        return {
-            'initial_performance': initial_performance,
-            'post_performance': initial_performance,  # No change since we're skipping
-            'performance_change': 0.0,
-            'total_loss': 0.0,
-            'pg_loss': 0.0,
-            'kl_penalty': 0.0,
-            'step_metrics': [],
-            'batch_size': batch_size,
-            'num_generations': num_generations,
-            'grad_accum_steps': grad_accum_steps,
-            'effective_batch': batch_size * num_generations,
-            'microbatch_size': microbatch_size,
-            'error': f'Tensor size mismatch: expected {expected_size}, got {all_rewards_tensor.numel()}'
+            'error': error_msg
         }
     
     # TRL Formula 1: Reshape rewards to (batch_size, num_generations)
@@ -1046,87 +1123,21 @@ def manual_grpo_single_batch(
                     output_scores=True,
                 )
                 
-                # Validate generation output  
-                if outputs is None or not hasattr(outputs, 'sequences') or outputs.sequences is None:
-                    print(f"    ⚠️  Generation failed - creating dummy completions")
-                    prompt_completions = ["[GENERATION_FAILED]" for _ in range(num_generations)]
-                    prompt_log_probs = [-10.0 for _ in range(num_generations)]
-                    prompt_ref_log_probs = [-10.0 for _ in range(num_generations)]
-                elif len(outputs.sequences) != num_generations:
-                    print(f"    ⚠️  Expected {num_generations} generations, got {len(outputs.sequences)} - padding with dummies")
-                    prompt_completions = []
-                    prompt_log_probs = []
-                    prompt_ref_log_probs = []
-                    
-                    # Process actual generations
-                    num_actual = min(len(outputs.sequences), num_generations)
-                    for j in range(num_actual):
-                        full_sequence = outputs.sequences[j]
-                        completion_tokens = full_sequence[prompt_length:]
-                        completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-                        completion_text_normalized = normalize_spacing(completion_text)
-                        prompt_completions.append(completion_text_normalized)
-                        
-                        # Calculate log probs for actual generations
-                        with torch.no_grad():
-                            train_outputs = training_model(full_sequence.unsqueeze(0))
-                            train_logits = train_outputs.logits[0]
-                            completion_logits = train_logits[prompt_length-1:-1]
-                            completion_log_probs = F.log_softmax(completion_logits, dim=-1)
-                            token_log_probs = completion_log_probs.gather(1, completion_tokens.unsqueeze(1)).squeeze(1)
-                            train_total_log_prob = token_log_probs.sum().item()
-                            prompt_log_probs.append(train_total_log_prob)
-                        
-                        with torch.no_grad():
-                            ref_outputs = reference_model(full_sequence.unsqueeze(0))
-                            ref_logits = ref_outputs.logits[0]
-                            ref_completion_logits = ref_logits[prompt_length-1:-1]
-                            ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
-                            ref_token_log_probs = ref_completion_log_probs.gather(1, completion_tokens.unsqueeze(1)).squeeze(1)
-                            ref_total_log_prob = ref_token_log_probs.sum().item()
-                            prompt_ref_log_probs.append(ref_total_log_prob)
-                        
-                        print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
-                        print(f"           Text: {completion_text[:60]}...")
-                        print(f"           Normalized: {completion_text_normalized[:60]}...")
-                    
-                    # Pad with dummies for missing generations
-                    for j in range(num_actual, num_generations):
-                        prompt_completions.append("[GENERATION_FAILED]")
-                        prompt_log_probs.append(-10.0)
-                        prompt_ref_log_probs.append(-10.0)
-                        print(f"    Gen {j+1}: [DUMMY] Train_LP=-10.0, Ref_LP=-10.0")
-                else:
-                    # Normal case - process all generations
-                    prompt_completions = []
-                    prompt_log_probs = []
-                    prompt_ref_log_probs = []
-                    
-                    for j in range(num_generations):
-                        full_sequence = outputs.sequences[j]
-                        completion_tokens = full_sequence[prompt_length:]
-                        completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
-                        completion_text_normalized = normalize_spacing(completion_text)
-                        prompt_completions.append(completion_text_normalized)
-                        with torch.no_grad():
-                            train_outputs = training_model(full_sequence.unsqueeze(0))
-                            train_logits = train_outputs.logits[0]
-                            completion_logits = train_logits[prompt_length-1:-1]
-                            completion_log_probs = F.log_softmax(completion_logits, dim=-1)
-                            token_log_probs = completion_log_probs.gather(1, completion_tokens.unsqueeze(1)).squeeze(1)
-                            train_total_log_prob = token_log_probs.sum().item()
-                            prompt_log_probs.append(train_total_log_prob)
-                        with torch.no_grad():
-                            ref_outputs = reference_model(full_sequence.unsqueeze(0))
-                            ref_logits = ref_outputs.logits[0]
-                            ref_completion_logits = ref_logits[prompt_length-1:-1]
-                            ref_completion_log_probs = F.log_softmax(ref_completion_logits, dim=-1)
-                            ref_token_log_probs = ref_completion_log_probs.gather(1, completion_tokens.unsqueeze(1)).squeeze(1)
-                            ref_total_log_prob = ref_token_log_probs.sum().item()
-                            prompt_ref_log_probs.append(ref_total_log_prob)
-                        print(f"    Gen {j+1}: Train_LP={train_total_log_prob:7.1f}, Ref_LP={ref_total_log_prob:7.1f}")
-                        print(f"           Text: {completion_text[:60]}...")
-                        print(f"           Normalized: {completion_text_normalized[:60]}...")
+                # Use consolidated validation and processing for multi-step training
+                prompt_completions, prompt_log_probs, prompt_ref_log_probs, failure_info = validate_and_process_generation(
+                    outputs, num_generations, prompt_length, tokenizer, training_model, reference_model, 
+                    seed_offset=3000 + (step_idx * 100) + i
+                )
+                
+                # Log generation failure details for root cause analysis
+                if failure_info['failed'] or failure_info['partial_failure']:
+                    print(f"    🚨 ALERT: Generation failure detected at step {step_idx}, prompt {i+1}")
+                    print(f"       Failure type: {'Complete' if failure_info['failed'] else 'Partial'}")
+                    print(f"       Expected completions: {failure_info['expected_count']}")
+                    print(f"       Actual completions: {failure_info['actual_count']}")
+                    print(f"       Root cause analysis:")
+                    for detail in failure_info['diagnostic_details']:
+                        print(f"         • {detail}")
                 all_completions.append(prompt_completions)
                 all_log_probs.append(prompt_log_probs)
                 all_ref_log_probs.append(prompt_ref_log_probs)
@@ -1143,26 +1154,30 @@ def manual_grpo_single_batch(
                 # Validate completions before scoring
                 if not completions or len(completions) == 0:
                     print(f"  ⚠️  No completions found for prompt {i+1} - using dummy scores")
-                    dummy_scores = [-1.0] * num_generations
+                    dummy_scores = [FAILED_GENERATION_REWARD] * num_generations
                     all_rewards.append(dummy_scores)
                     continue
                 elif len(completions) != num_generations:
                     print(f"  ⚠️  Expected {num_generations} completions, got {len(completions)} for prompt {i+1}")
                     # Pad with dummy scores if needed
-                    padded_completions = completions + ["[DUMMY]"] * max(0, num_generations - len(completions))
+                    padded_completions = completions + [DUMMY_COMPLETION_TEXT] * max(0, num_generations - len(completions))
                     completions = padded_completions[:num_generations]  # Trim if too many
                 
                 try:
                     scores = reward_fn(completions, prompts=[prompt] * len(completions))
                     all_rewards.append(scores)
                     for j, (completion, score) in enumerate(zip(completions, scores)):
-                        completion_display = completion[:40] if completion != "[GENERATION_FAILED]" else "[GEN_FAILED]"
+                        completion_display = completion[:40] if completion != FAILED_GENERATION_TEXT else "[GEN_FAILED]"
                         print(f"  Gen {j+1}: Reward={score:6.3f} | {completion_display}...")
                     avg_score = sum(scores) / len(scores)
                     print(f"  📊 Average reward: {avg_score:.3f}")
                 except Exception as e:
                     print(f"  ❌ Error scoring: {e}")
-                    all_rewards.append([-0.5] * num_generations)
+                    print(f"     🚨 SCORING_FAILURE_ALERT: Reward function error at step {step_idx}, prompt {i+1}")
+                    print(f"     Root cause: {str(e)}")
+                    print(f"     Impact: Using dummy reward scores ({DUMMY_GENERATION_REWARD}) for all completions")
+                    print(f"     Recommendation: Check reward function implementation and completion formatting")
+                    all_rewards.append([DUMMY_GENERATION_REWARD] * num_generations)
             _t_rewards = time.time() - _t_rewards0
             print(f"[timing] rewards: {_t_rewards:.2f}s")
 
@@ -1174,12 +1189,17 @@ def manual_grpo_single_batch(
             print(f"  Total rewards shape: {all_rewards_tensor.shape}")
             print(f"  Rewards: {all_rewards_tensor.numpy()}")
             
-            # Validate tensor shape before reshaping
-            expected_size = batch_size * num_generations
-            if all_rewards_tensor.numel() == 0:
-                print(f"  ❌ ERROR: Empty rewards tensor at step {step_idx}! Expected {expected_size} rewards, got {all_rewards_tensor.numel()}")
-                print(f"  This indicates generation failure - check the generation phase logs above.")
-                print(f"  Skipping training step {step_idx} due to empty rewards.")
+            # Validate tensor shape before reshaping using helper function
+            is_valid, error_info = validate_tensor_for_reshape(
+                all_rewards_tensor, batch_size, num_generations, f"rewards tensor reshape at step {step_idx}"
+            )
+            
+            if not is_valid:
+                print(f"  🚨 CRITICAL: Training step {step_idx} cannot continue due to tensor validation failure")
+                print(f"  Skipping training step to prevent crash")
+                
+                error_msg = "Empty rewards tensor - generation failed" if error_info['is_empty'] else f"Tensor size mismatch: expected {error_info['expected_size']}, got {error_info['actual_size']}"
+                
                 # Record failed step and break out of training loop
                 step_metrics.append({
                     'step': int(step_idx),
@@ -1193,28 +1213,7 @@ def manual_grpo_single_batch(
                     'grad_norm': None,
                     'beta': float(beta),
                     'sec': 0.0,
-                    'error': 'Empty rewards tensor - generation failed'
-                })
-                break  # Exit the training loop
-            elif all_rewards_tensor.numel() != expected_size:
-                print(f"  ❌ ERROR: Rewards tensor size mismatch at step {step_idx}! Expected {expected_size} rewards, got {all_rewards_tensor.numel()}")
-                print(f"  Cannot reshape [{all_rewards_tensor.numel()}] to [{batch_size}, {num_generations}]")
-                print(f"  This indicates partial generation failure or reward calculation error.")
-                print(f"  Skipping training step {step_idx} due to tensor size mismatch.")
-                # Record failed step and break out of training loop
-                step_metrics.append({
-                    'step': int(step_idx),
-                    'pre': float(last_post_performance),
-                    'post': float(last_post_performance),
-                    'delta': 0.0,
-                    'pg': 0.0,
-                    'kl': 0.0,
-                    'kl_ratio': 0.0,
-                    'adv': 0.0,
-                    'grad_norm': None,
-                    'beta': float(beta),
-                    'sec': 0.0,
-                    'error': f'Tensor size mismatch: expected {expected_size}, got {all_rewards_tensor.numel()}'
+                    'error': error_msg
                 })
                 break  # Exit the training loop
                 
