@@ -289,7 +289,7 @@ def evaluate_on_eval_set(
             model,
             input_ids=inputs.input_ids,
             attention_mask=inputs.attention_mask,
-            max_new_tokens=144,
+            max_new_tokens=196,
             do_sample=False,  # Greedy
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,

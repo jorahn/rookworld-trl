@@ -85,7 +85,7 @@ def evaluate_model(model_path="jrahn/RookWorld-LM-124M", eval_file="opening_data
             model,
             input_ids=inputs.input_ids,
             attention_mask=inputs.attention_mask,
-            max_new_tokens=100,
+            max_new_tokens=196,
             do_sample=False,  # Greedy
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
